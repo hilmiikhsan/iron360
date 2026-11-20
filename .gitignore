@@ -1,0 +1,40 @@
+# ---- Secrets & environment (NEVER commit) ----
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secret*.txt
+jwt_secret*
+.jwt_secret
+data/.jwt_secret
+
+# Planning doc contains credentials — keep it out of the repo
+vapt_ai_agent.md
+
+# ---- Data / runtime ----
+data/*.db
+data/*.sqlite3
+data/evidence/
+data/artifacts/
+*.log
+logs/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+
+# ---- Node / frontend build ----
+node_modules/
+dist/
+
+# ---- OS / editor ----
+.DS_Store
+.idea/
+.vscode/
+*.swp

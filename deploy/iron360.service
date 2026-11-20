@@ -1,0 +1,23 @@
+# systemd unit for Iron360 — place at /etc/systemd/system/iron360.service
+# Adjust User and paths to your server.
+[Unit]
+Description=Iron360 VAPT AI Console
+After=network.target
+
+[Service]
+Type=simple
+User=<deploy-user>
+WorkingDirectory=/home/<deploy-user>/iron360
+EnvironmentFile=/home/<deploy-user>/iron360/.env
+ExecStart=/home/<deploy-user>/iron360/.venv/bin/uvicorn backend.main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=3
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/<deploy-user>/iron360/data
+
+[Install]
+WantedBy=multi-user.target
