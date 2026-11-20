@@ -53,6 +53,9 @@ def _migrate() -> None:
             "fix_config": "TEXT DEFAULT ''",
             "fix_steps": "TEXT DEFAULT ''",
         },
+        "scans": {
+            "profile": "VARCHAR(16) DEFAULT 'full'",
+        },
     }
     with engine.begin() as conn:
         for table, cols in add_cols.items():

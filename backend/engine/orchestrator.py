@@ -110,53 +110,103 @@ def categorize_urls(urls: list[str]) -> dict[str, list[str]]:
 
 
 # ------------------------------------------------------------------ pipeline
-def _phases(target: Target, mode: str) -> list[tuple[str, list[tuple[str, str, dict, str]]]]:
-    """Phased pipeline. Tools chosen per the ebook methodology; many sources per phase,
-    results merged + deduped. (tool, host, options, description)."""
+# Scan profiles (Nessus-style policies) — which phases run and how intense.
+# Each profile lists the ordered phase names it includes; "content" only ever
+# runs in pentest mode. The Vulnerability-scan phase composition is profile-aware.
+PROFILES: dict[str, dict] = {
+    "full":       {"phases": ["recon", "fingerprint", "port", "crawl", "vuln", "content"],
+                   "desc": "Everything — deepest coverage"},
+    "quick":      {"phases": ["recon", "fingerprint", "port", "vuln"],
+                   "desc": "Fast triage — high/critical only"},
+    "web":        {"phases": ["fingerprint", "crawl", "vuln", "content"],
+                   "desc": "Web application focus"},
+    "network":    {"phases": ["recon", "port", "vuln"],
+                   "desc": "Network/host focus — ports + NSE"},
+    "compliance": {"phases": ["fingerprint", "vuln"],
+                   "desc": "Credentialed CIS compliance focus"},
+}
+
+
+def _vuln_steps(host: str, profile: str) -> list[tuple[str, str, dict, str]]:
+    if profile == "quick":
+        return [("nuclei", host, {"severity": "high,critical"}, "Template vuln scan (high/critical)")]
+    if profile == "network":
+        return [("nmap", host, {"sv": True, "scripts": "vuln"}, "Network vulnerability scripts (nmap NSE)")]
+    if profile == "web":
+        return [
+            ("nuclei", host, {"severity": "info,low,medium,high,critical"}, "Full template vuln scan (all severities)"),
+            ("nikto", host, {}, "Web server vuln scan"),
+            ("sslscan", host, {}, "TLS/SSL protocol + cipher audit"),
+        ]
+    if profile == "compliance":
+        return [
+            ("nuclei", host, {"severity": "medium,high,critical"}, "Misconfig/exposure template scan"),
+            ("sslscan", host, {}, "TLS/SSL protocol + cipher audit"),
+        ]
+    # full
+    return [
+        ("nuclei", host, {"severity": "info,low,medium,high,critical"}, "Full template vuln scan (all severities)"),
+        ("nmap", host, {"sv": True, "scripts": "vuln"}, "Network vulnerability scripts (nmap NSE)"),
+        ("nikto", host, {}, "Web server vuln scan"),
+        ("sslscan", host, {}, "TLS/SSL protocol + cipher audit"),
+    ]
+
+
+def _phases(target: Target, mode: str, profile: str = "full") -> list[tuple[str, list[tuple[str, str, dict, str]]]]:
+    """Phased pipeline, filtered by the selected scan profile. (tool, host, options, description)."""
     host = target.value
     is_domain = target.kind == "domain"
+    wanted = PROFILES.get(profile, PROFILES["full"])["phases"]
+
     recon = []
     if is_domain:
         recon.append(("subfinder", host, {}, "Enumerate subdomains (passive)"))
         recon.append(("gau", host, {}, "Gather known URLs — Wayback/OTX (passive)"))
     recon.append(("dnsx", host, {}, "Resolve DNS records"))
-    phases: list[tuple[str, list]] = [
-        ("Recon", recon),
-        ("Fingerprint", [
+
+    blocks: dict[str, tuple[str, list]] = {
+        "recon": ("Recon", recon),
+        "fingerprint": ("Fingerprint", [
             ("httpx", host, {}, "Probe live HTTP + tech stack"),
             ("whatweb", host, {}, "Fingerprint web technologies"),
         ]),
-        ("Port scan", [("nmap", host, {"sv": True}, "Top ports + service versions")]),
-        ("Crawl", [("katana", host, {}, "Crawl endpoints (active)")]),
-        ("Vulnerability scan", [
-            ("nuclei", host, {"severity": "info,low,medium,high,critical"}, "Full template vuln scan (all severities)"),
-            ("nmap", host, {"sv": True, "scripts": "vuln"}, "Network vulnerability scripts (nmap NSE)"),
-            ("nikto", host, {}, "Web server vuln scan"),
-            ("sslscan", host, {}, "TLS/SSL protocol + cipher audit"),
-        ]),
-    ]
-    if mode == "pentest":
-        phases.append(("Content discovery", [
+        "port": ("Port scan", [("nmap", host, {"sv": True}, "Top ports + service versions")]),
+        "crawl": ("Crawl", [("katana", host, {}, "Crawl endpoints (active)")]),
+        "vuln": ("Vulnerability scan", _vuln_steps(host, profile)),
+        "content": ("Content discovery", [
             ("ffuf", host, {}, "Directory/file brute-force (seclists)"),
             ("arjun", host, {}, "Discover hidden parameters"),
-        ]))
+        ]),
+    }
+
+    phases: list[tuple[str, list]] = []
+    for name in wanted:
+        if name == "content" and mode != "pentest":
+            continue  # content discovery is intrusive — pentest only
+        if name in blocks and blocks[name][1]:
+            phases.append(blocks[name])
     return phases
 
 
 def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
-              on_finding: Callable[[dict], None], stop_event: threading.Event | None = None) -> str:
+              on_finding: Callable[[dict], None], stop_event: threading.Event | None = None,
+              profile: str = "full") -> str:
     host = target.value
-    phases = _phases(target, mode)
+    phases = _phases(target, mode, profile)
     flat = [(t, h, o, d) for _, steps in phases for (t, h, o, d) in steps]
     has_auth = target.auth_type in ("ssh_password", "ssh_key") and bool(target.auth_user)
+    run_cis = profile == "compliance" or has_auth
+    prof_desc = PROFILES.get(profile, PROFILES["full"])["desc"]
 
     plan_steps = []
     if has_auth:
         plan_steps.append({"n": 1, "tool": "auth-va", "desc": "Credentialed SSH assessment"})
     base = len(plan_steps)
     plan_steps += [{"n": base + i + 1, "tool": t, "desc": d} for i, (t, _, _, d) in enumerate(flat)]
+    if run_cis:
+        plan_steps.append({"n": len(plan_steps) + 1, "tool": "cis-compliance", "desc": "CIS benchmark evaluation"})
     emit({"type": "plan", "steps": plan_steps})
-    emit({"type": "reasoning", "text": f"Authorized {mode.upper()} on {host}. "
+    emit({"type": "reasoning", "text": f"Authorized {mode.upper()} on {host} · profile: {profile} ({prof_desc}). "
           f"{'Credentialed + ' if has_auth else ''}{len(phases)} phases, scope-enforced. "
           "Multi-source results are merged and deduped; then Claude analyzes."})
 
@@ -206,6 +256,17 @@ def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
                     sub_lines += lines
             else:
                 emit({"type": "step", "n": n, "tool": tool_name, "status": "failed", "text": res.denied_reason or "failed"})
+
+    # CIS compliance evaluation (deterministic, from credentialed output)
+    if run_cis and not _stopped(stop_event):
+        n += 1
+        emit({"type": "step", "n": n, "tool": "cis-compliance", "status": "running", "text": "CIS benchmark evaluation"})
+        from . import compliance
+        cis_findings = compliance.run_cis(collected, emit)
+        all_findings += cis_findings
+        emit({"type": "step", "n": n, "tool": "cis-compliance",
+              "status": "done" if any(s.startswith("auth:") for s, _, _ in collected) else "skipped",
+              "text": f"CIS evaluation — {len(cis_findings)} control failure(s)"})
 
     # Merge + dedupe + parameter extraction + gf-pattern tagging (3 Bugs methodology)
     uniq_urls = sorted({u for u in url_lines if u.startswith("http")})
@@ -298,10 +359,15 @@ def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
     # (2) Align severity to CVE CVSS where a CVE is present
     all_findings = _apply_cve_severity(all_findings, emit)
 
-    # (1) Anti-FP verification pass over ALL findings (probe + AI)
+    # (1) Anti-FP verification pass over findings (probe + AI). CIS checks are
+    # deterministic config evaluations — exempt from the adversarial AI re-scoring.
     if all_findings and not _stopped(stop_event):
-        emit({"type": "reasoning", "text": "Anti-false-positive pass: adversarially challenging every finding before reporting…"})
-        all_findings = _verify_findings(target, all_findings, emit)
+        det = [f for f in all_findings if "cis-benchmark" in (f.get("sources") or [])]
+        challengeable = [f for f in all_findings if "cis-benchmark" not in (f.get("sources") or [])]
+        if challengeable:
+            emit({"type": "reasoning", "text": "Anti-false-positive pass: adversarially challenging every finding before reporting…"})
+            challengeable = _verify_findings(target, challengeable, emit)
+        all_findings = det + challengeable
 
     for f in all_findings:
         on_finding(f)
@@ -544,11 +610,12 @@ def _run_sim(target: Target, mode: str, autonomy: str, emit: Emit,
 
 # ------------------------------------------------------------------ entry point
 def run_assessment(target: Target, mode: str, autonomy: str, emit: Emit,
-                   on_finding: Callable[[dict], None], stop_event: threading.Event | None = None) -> str:
+                   on_finding: Callable[[dict], None], stop_event: threading.Event | None = None,
+                   profile: str = "full") -> str:
     emit({"type": "note", "text": f"Engine: {'LIVE (Claude)' if settings.ai_live else 'SIMULATION'}"})
     try:
         if settings.ai_live:
-            return _run_live(target, mode, autonomy, emit, on_finding, stop_event)
+            return _run_live(target, mode, autonomy, emit, on_finding, stop_event, profile)
         return _run_sim(target, mode, autonomy, emit, on_finding, stop_event)
     except Exception as e:  # noqa: BLE001
         emit({"type": "error", "text": f"engine error: {e}"})

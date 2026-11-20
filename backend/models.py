@@ -63,6 +63,8 @@ class Scan(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     target_id: Mapped[int] = mapped_column(ForeignKey("targets.id"))
     mode: Mapped[str] = mapped_column(String(16), default="va")  # va | pentest
+    # Scan policy/profile — which phases & intensity run (Nessus-style policies).
+    profile: Mapped[str] = mapped_column(String(16), default="full")  # quick|full|web|network|compliance
     status: Mapped[str] = mapped_column(String(16), default="queued")  # queued|running|done|failed|stopped
     autonomy: Mapped[str] = mapped_column(String(16), default="approve")  # auto | approve
     started_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)

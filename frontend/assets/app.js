@@ -239,6 +239,7 @@ async function viewDashboard() {
     <div class="section-title"><h3>Recent scans</h3><div class="spacer"></div><button class="btn sm" id="goPentest">Start AI Pentest →</button></div>
     <div class="card">${scansTable(scans)}</div>`;
   $("#goPentest").addEventListener("click", () => setView("pentest"));
+  c.querySelectorAll("[data-diff]").forEach((b) => b.addEventListener("click", () => showScanDiff(Number(b.dataset.diff))));
 }
 
 function statCard(k, v, trend, color) {
@@ -257,11 +258,38 @@ function sevBars(sev) {
 }
 function scansTable(scans) {
   if (!scans.length) return `<div class="empty">No scans yet. Start an AI pentest to populate findings.</div>`;
-  return `<table><thead><tr><th>ID</th><th>Mode</th><th>Autonomy</th><th>Status</th><th>Started</th><th>Summary</th></tr></thead><tbody>
-    ${scans.map((s) => `<tr><td>#${s.id}</td><td>${s.mode.toUpperCase()}</td><td>${s.autonomy}</td>
+  return `<table><thead><tr><th>ID</th><th>Mode</th><th>Profile</th><th>Autonomy</th><th>Status</th><th>Started</th><th>Summary</th><th></th></tr></thead><tbody>
+    ${scans.map((s) => `<tr><td>#${s.id}</td><td>${s.mode.toUpperCase()}</td>
+      <td><span class="tag">${esc((s.profile || "full"))}</span></td><td>${s.autonomy}</td>
       <td><span class="pill ${s.status === "done" ? "confirmed" : s.status === "failed" ? "critical" : "needs_review"}">${s.status}</span></td>
-      <td class="muted">${fmtTime(s.started_at)}</td><td class="muted">${esc((s.summary || "").slice(0, 90))}</td></tr>`).join("")}
+      <td class="muted">${fmtTime(s.started_at)}</td><td class="muted">${esc((s.summary || "").slice(0, 70))}</td>
+      <td>${["done", "stopped"].includes(s.status) ? `<button class="btn ghost sm" data-diff="${s.id}">Compare</button>` : ""}</td></tr>`).join("")}
   </tbody></table>`;
+}
+
+async function showScanDiff(scanId) {
+  const d = $("#drawer");
+  d.innerHTML = `<div class="muted">Comparing scan #${scanId} with previous…</div>`;
+  $("#drawerBg").classList.add("open"); d.classList.add("open");
+  let diff;
+  try { diff = await api(`/api/scans/${scanId}/diff`); }
+  catch (e) { d.innerHTML = `<div class="empty">Diff failed: ${esc(e.message)}</div>`; return; }
+  const sevPill = (f) => `<span class="pill ${f.severity}">${f.severity}</span>`;
+  const list = (arr, prefix) => arr.length
+    ? arr.map((f) => `<div class="row" style="margin:5px 0;gap:8px">${sevPill(f)}<b>${esc(f.title)}</b>
+        ${f.cve ? `<span class="tag" style="color:var(--accent)">${esc(f.cve)}</span>` : ""}
+        <small class="muted">${esc(f.affected || "")}</small>
+        ${prefix === "persistent" && f.baseline_severity && f.baseline_severity !== f.severity
+          ? `<small style="color:var(--warn)">was ${esc(f.baseline_severity)}</small>` : ""}</div>`).join("")
+    : `<div class="muted" style="padding:4px 0">none</div>`;
+  const base = diff.baseline_scan ? `scan #${diff.baseline_scan}` : "no earlier scan";
+  d.innerHTML = `
+    <div class="row spread"><h2 style="margin:0">Scan diff</h2><button class="btn ghost sm" id="closeDrawer">Close</button></div>
+    <div class="muted">#${diff.current_scan} vs ${esc(base)}${diff.note ? " · " + esc(diff.note) : ""}</div>
+    <div class="section-title"><h3 style="color:var(--critical)">🆕 New (${diff.new.length})</h3></div>${list(diff.new, "new")}
+    <div class="section-title"><h3 style="color:var(--ok)">✓ Fixed / gone (${diff.fixed.length})</h3></div>${list(diff.fixed, "fixed")}
+    <div class="section-title"><h3 class="muted">↻ Persistent (${diff.persistent.length})</h3></div>${list(diff.persistent, "persistent")}`;
+  $("#closeDrawer").addEventListener("click", closeDrawer);
 }
 
 /* ----------------------------- Targets & Scope ----------------------------- */
@@ -392,6 +420,15 @@ function viewPentest() {
           <label class="field"><span>Mode</span>
             <div class="seg" id="modeSeg"><button data-mode="va">VA scan</button><button data-mode="pentest" class="on">Pentest</button></div>
           </label>
+          <label class="field"><span>Scan profile</span>
+            <select id="profileSel" class="sel">
+              <option value="full" selected>Full — deepest coverage</option>
+              <option value="quick">Quick — fast triage (high/critical)</option>
+              <option value="web">Web — application focus</option>
+              <option value="network">Network — ports + NSE</option>
+              <option value="compliance">Compliance — credentialed CIS</option>
+            </select>
+          </label>
           <label class="field"><span>Autonomy</span>
             <div class="seg" id="autoSeg"><button data-auto="auto">Auto</button><button data-auto="approve" class="on">Approve intrusive</button></div>
           </label>
@@ -414,16 +451,16 @@ function viewPentest() {
   $("#autoSeg").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
     autonomy = b.dataset.auto; $("#autoSeg").querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
   }));
-  $("#startBtn").addEventListener("click", () => startScan(t, mode, autonomy));
+  $("#startBtn").addEventListener("click", () => startScan(t, mode, autonomy, $("#profileSel").value));
   $("#stopBtn").addEventListener("click", stopScan);
 }
 
-async function startScan(t, mode, autonomy) {
+async function startScan(t, mode, autonomy, profile) {
   if (!t.authorized) { toast("Target not authorized"); return; }
   $("#timeline").innerHTML = ""; $("#terminal").innerHTML = "";
   $("#startBtn").disabled = true; $("#stopBtn").disabled = false;
   try {
-    const scan = await api("/api/scans", { method: "POST", body: JSON.stringify({ target_id: t.id, mode, autonomy }) });
+    const scan = await api("/api/scans", { method: "POST", body: JSON.stringify({ target_id: t.id, mode, autonomy, profile: profile || "full" }) });
     State.scan = scan;
     openScanStream(scan.id);
   } catch (e) { toast(e.message); $("#startBtn").disabled = false; $("#stopBtn").disabled = true; }
@@ -494,6 +531,18 @@ function handleEvent(e) {
     case "finding":
       addTimeline("finding", `${(e.finding.status || "").toUpperCase()} · ${e.finding.severity} · ${e.finding.title} (conf ${e.finding.confidence}%)`);
       break;
+    case "intel": {
+      const items = e.items || [];
+      if (e.kind === "compliance") {
+        const fail = items.filter((i) => i.result === "fail").length;
+        addTimeline("reasoning", `CIS compliance: ${items.length - fail}/${items.length} controls pass · ${fail} fail`);
+      } else if (e.kind === "cve") {
+        addTimeline("reasoning", `CVE intel: ${items.map((i) => i.cve).join(", ")}`);
+      } else if (e.kind === "exploit-db") {
+        addTimeline("reasoning", `Exploit-DB: ${items.length} public exploit(s) matched`);
+      }
+      break;
+    }
     case "finish": addTimeline("finish", e.text); break;
     case "done":
       $("#startBtn") && ($("#startBtn").disabled = false); $("#stopBtn") && ($("#stopBtn").disabled = true);

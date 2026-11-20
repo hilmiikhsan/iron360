@@ -100,7 +100,8 @@ def _run(scan_id: int) -> None:
             db.commit()
 
         summary = orchestrator.run_assessment(
-            target, scan.mode, scan.autonomy, emit, on_finding, stop_event
+            target, scan.mode, scan.autonomy, emit, on_finding, stop_event,
+            profile=scan.profile or "full",
         )
 
         scan.summary = summary

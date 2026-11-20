@@ -8,12 +8,14 @@ from ..audit import record
 from ..config import get_settings
 from ..database import SessionLocal, get_db
 from ..engine import runner
-from ..models import Scan, Target, User
+from ..models import Finding, Scan, Target, User
 from ..schemas import ScanCreate, ScanOut
 from ..security import get_current_user
 
 router = APIRouter(prefix="/api/scans", tags=["scans"])
 settings = get_settings()
+
+PROFILES = {"quick", "full", "web", "network", "compliance"}
 
 
 @router.post("", response_model=ScanOut, status_code=201)
@@ -28,12 +30,15 @@ def create_scan(body: ScanCreate, db: Session = Depends(get_db), user: User = De
         )
     if body.mode not in {"va", "pentest"} or body.autonomy not in {"auto", "approve"}:
         raise HTTPException(status_code=400, detail="Invalid mode or autonomy")
-    scan = Scan(target_id=target.id, mode=body.mode, autonomy=body.autonomy, status="queued")
+    if body.profile not in PROFILES:
+        raise HTTPException(status_code=400, detail=f"Invalid profile (allowed: {', '.join(sorted(PROFILES))})")
+    scan = Scan(target_id=target.id, mode=body.mode, autonomy=body.autonomy,
+                profile=body.profile, status="queued")
     db.add(scan)
     db.commit()
     db.refresh(scan)
     record(db, actor=user.username, action="scan_start", target_value=target.value,
-           detail=f"mode={body.mode} autonomy={body.autonomy} scan_id={scan.id}")
+           detail=f"mode={body.mode} profile={body.profile} autonomy={body.autonomy} scan_id={scan.id}")
     runner.start_scan(scan.id)
     return scan
 
@@ -65,6 +70,54 @@ def stop_scan(scan_id: int, db: Session = Depends(get_db), user: User = Depends(
         db.commit()
         record(db, actor=user.username, action="scan_stop", detail=f"scan_id={scan_id}")
     return scan
+
+
+def _fkey(f: Finding) -> str:
+    """Identity of a finding across scans — title + affected surface (case/space-normalized)."""
+    title = " ".join((f.title or "").lower().split())
+    aff = " ".join((f.affected or "").lower().split())
+    return f"{title}||{aff}"
+
+
+def _fbrief(f: Finding) -> dict:
+    return {"id": f.id, "title": f.title, "severity": f.severity, "status": f.status,
+            "confidence": f.confidence, "cve": f.cve, "affected": f.affected}
+
+
+@router.get("/{scan_id}/diff")
+def diff_scan(scan_id: int, against: int | None = None,
+              db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Delta between this scan and a baseline (new / fixed / persistent findings).
+
+    If `against` is omitted, the previous completed scan of the same target is used —
+    this is how Nessus-style 'what changed since last scan' tracking works.
+    """
+    cur = db.get(Scan, scan_id)
+    if not cur:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    if against is not None:
+        base = db.get(Scan, against)
+    else:
+        base = (db.query(Scan)
+                .filter(Scan.target_id == cur.target_id, Scan.id < cur.id,
+                        Scan.status.in_(["done", "stopped"]))
+                .order_by(Scan.id.desc()).first())
+    cur_f = db.query(Finding).filter(Finding.scan_id == cur.id,
+                                     Finding.status != "false_positive").all()
+    if base is None:
+        return {"current_scan": scan_id, "baseline_scan": None,
+                "new": [_fbrief(f) for f in cur_f], "fixed": [], "persistent": [],
+                "note": "No earlier scan to compare against — all findings are new."}
+    base_f = db.query(Finding).filter(Finding.scan_id == base.id,
+                                      Finding.status != "false_positive").all()
+    base_map = {_fkey(f): f for f in base_f}
+    cur_map = {_fkey(f): f for f in cur_f}
+    new = [_fbrief(f) for k, f in cur_map.items() if k not in base_map]
+    fixed = [_fbrief(f) for k, f in base_map.items() if k not in cur_map]
+    persistent = [{**_fbrief(c), "baseline_severity": base_map[k].severity}
+                  for k, c in cur_map.items() if k in base_map]
+    return {"current_scan": scan_id, "baseline_scan": base.id,
+            "new": new, "fixed": fixed, "persistent": persistent}
 
 
 def _user_from_token(token: str | None) -> str | None:

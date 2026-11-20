@@ -72,12 +72,14 @@ class ScanCreate(BaseModel):
     target_id: int
     mode: str = "pentest"          # va | pentest
     autonomy: str = "approve"      # auto | approve
+    profile: str = "full"          # quick | full | web | network | compliance
 
 
 class ScanOut(ORMModel):
     id: int
     target_id: int
     mode: str
+    profile: str
     status: str
     autonomy: str
     started_at: dt.datetime
