@@ -43,6 +43,9 @@ Methodology to apply when reading the output:
 - Exposed sensitive files (.env/.sql/.bak/.config/.git) are information-disclosure findings.
 - JS files may leak endpoints/secrets — flag for manual review.
 - Open ports/services (from nmap) → map to service-specific risks (outdated version, default creds, exposed admin).
+- 'auth:*' sources are CREDENTIALED (authenticated) checks run over SSH: correlate installed package versions
+  (key_packages/kernel_pkgs) with known CVEs; flag SSH misconfig (PermitRootLogin yes, PasswordAuthentication yes,
+  PermitEmptyPasswords yes), passwordless sudo, unusual SUID binaries, world-writable files, and stale patching.
 - Corroborate across tools; a single low-signal hit is 'needs_review', not 'confirmed'.
 
 Rules:
@@ -126,7 +129,8 @@ def _phases(target: Target, mode: str) -> list[tuple[str, list[tuple[str, str, d
         ("Port scan", [("nmap", host, {"sv": True}, "Top ports + service versions")]),
         ("Crawl", [("katana", host, {}, "Crawl endpoints (active)")]),
         ("Vulnerability scan", [
-            ("nuclei", host, {"severity": "critical,high,medium,low"}, "Template-based vuln scan"),
+            ("nuclei", host, {"severity": "info,low,medium,high,critical"}, "Full template vuln scan (all severities)"),
+            ("nmap", host, {"sv": True, "scripts": "vuln"}, "Network vulnerability scripts (nmap NSE)"),
             ("nikto", host, {}, "Web server vuln scan"),
             ("sslscan", host, {}, "TLS/SSL protocol + cipher audit"),
         ]),
@@ -144,16 +148,34 @@ def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
     host = target.value
     phases = _phases(target, mode)
     flat = [(t, h, o, d) for _, steps in phases for (t, h, o, d) in steps]
+    has_auth = target.auth_type in ("ssh_password", "ssh_key") and bool(target.auth_user)
 
-    emit({"type": "plan", "steps": [{"n": i + 1, "tool": t, "desc": d} for i, (t, _, _, d) in enumerate(flat)]})
-    emit({"type": "reasoning", "text": f"Authorized {mode.upper()} on {host}. {len(phases)} phases, "
-          f"{len(flat)} tools, scope-enforced. Multi-source results are merged and deduped; then Claude analyzes."})
+    plan_steps = []
+    if has_auth:
+        plan_steps.append({"n": 1, "tool": "auth-va", "desc": "Credentialed SSH assessment"})
+    base = len(plan_steps)
+    plan_steps += [{"n": base + i + 1, "tool": t, "desc": d} for i, (t, _, _, d) in enumerate(flat)]
+    emit({"type": "plan", "steps": plan_steps})
+    emit({"type": "reasoning", "text": f"Authorized {mode.upper()} on {host}. "
+          f"{'Credentialed + ' if has_auth else ''}{len(phases)} phases, scope-enforced. "
+          "Multi-source results are merged and deduped; then Claude analyzes."})
 
     collected: list[tuple[str, str, str]] = []
     all_findings: list[dict] = []
     url_lines: list[str] = []
     sub_lines: list[str] = []
     n = 0
+
+    # Credentialed VA first (if SSH creds configured for this target)
+    if has_auth and not _stopped(stop_event):
+        n += 1
+        emit({"type": "step", "n": n, "tool": "auth-va", "status": "running", "text": "Credentialed SSH assessment"})
+        from . import auth_va
+        auth_collected = auth_va.run_auth_va(target, emit, stop_event)
+        collected += auth_collected
+        emit({"type": "step", "n": n, "tool": "auth-va", "status": "done" if auth_collected else "failed",
+              "text": f"Credentialed checks — {len(auth_collected)} data point(s)"})
+
     for phase_name, steps in phases:
         if _stopped(stop_event):
             emit({"type": "finish", "text": "Assessment stopped by operator."})

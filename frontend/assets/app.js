@@ -287,7 +287,8 @@ function renderTargetsTable() {
       <td><small class="muted">${[t.value].concat(t.scope_extra || []).map(esc).join("<br>")}</small></td>
       <td>${t.authorized
         ? `<span class="pill confirmed">authorized</span><br><small class="muted">${esc(t.authorization_ref || "")}</small>`
-        : `<span class="pill needs_review">unauthorized</span>`}</td>
+        : `<span class="pill needs_review">unauthorized</span>`}
+        ${t.auth_type && t.auth_type !== "none" ? `<br><span class="pill low">🔑 credentialed ${esc(t.auth_user || "")}</span>` : ""}</td>
       <td class="row">
         <button class="btn ghost sm" data-auth="${t.id}">${t.authorized ? "Revoke" : "Authorize"}</button>
         <button class="btn danger sm" data-del="${t.id}">Delete</button>
@@ -326,6 +327,13 @@ function openTargetModal() {
     <label class="field"><span>Engagement / client</span><input id="mEng" placeholder="Indorama Ventures" /></label>
     <label class="field"><span>Extra in-scope hosts (one per line)</span><textarea id="mScope" rows="3" placeholder="api.example.com&#10;10.0.0.0/24"></textarea></label>
     <label class="field"><span>Authorization reference (SOW/PKS/NDA) — leave blank to add as unauthorized</span><input id="mRef" placeholder="SOW-2026-014" /></label>
+    <div class="section-title" style="margin:6px 0 10px"><h3 style="font-size:12px;color:var(--muted)">Credentialed VA (optional — like Nessus)</h3></div>
+    <div class="inline-2">
+      <label class="field"><span>SSH auth</span><select id="mAuthType"><option value="none">none</option><option value="ssh_password">password</option><option value="ssh_key">private key</option></select></label>
+      <label class="field"><span>SSH port</span><input id="mAuthPort" value="22" /></label>
+    </div>
+    <label class="field"><span>SSH user</span><input id="mAuthUser" placeholder="root / ubuntu" /></label>
+    <label class="field"><span>SSH password or private key (stored only in local DB)</span><textarea id="mAuthSecret" rows="2" placeholder="password, or paste private key"></textarea></label>
     <div class="row spread" style="margin-top:10px">
       <button class="btn ghost" id="mCancel">Cancel</button>
       <button class="btn sm" id="mSave">Create</button>
@@ -346,6 +354,10 @@ async function saveTarget() {
     scope_extra: $("#mScope").value.split("\n").map((s) => s.trim()).filter(Boolean),
     authorized: !!ref,
     authorization_ref: ref,
+    auth_type: $("#mAuthType").value,
+    auth_user: $("#mAuthUser").value.trim(),
+    auth_secret: $("#mAuthSecret").value,
+    auth_port: parseInt($("#mAuthPort").value, 10) || 22,
   };
   if (!body.value) { $("#mErr").textContent = "Domain/IP is required"; return; }
   try {

@@ -32,6 +32,10 @@ class TargetCreate(BaseModel):
     authorization_ref: str = ""
     scope_extra: list[str] = []
     notes: str = ""
+    auth_type: str = "none"         # none | ssh_password | ssh_key
+    auth_user: str = ""
+    auth_secret: str = ""
+    auth_port: int = 22
 
 
 class TargetUpdate(BaseModel):
@@ -41,6 +45,10 @@ class TargetUpdate(BaseModel):
     authorization_ref: str | None = None
     scope_extra: list[str] | None = None
     notes: str | None = None
+    auth_type: str | None = None
+    auth_user: str | None = None
+    auth_secret: str | None = None
+    auth_port: int | None = None
 
 
 class TargetOut(ORMModel):
@@ -53,6 +61,9 @@ class TargetOut(ORMModel):
     authorization_ref: str
     scope_extra: list[str]
     notes: str
+    auth_type: str
+    auth_user: str
+    auth_port: int
     created_at: dt.datetime
 
 

@@ -36,3 +36,33 @@ def init_db() -> None:
     from . import models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
+    _migrate()
+
+
+def _migrate() -> None:
+    """Lightweight additive migrations (SQLite create_all won't alter existing tables)."""
+    from sqlalchemy import text
+    add_cols = {
+        "targets": {
+            "auth_type": "VARCHAR(16) DEFAULT 'none'",
+            "auth_user": "VARCHAR(64) DEFAULT ''",
+            "auth_secret": "TEXT DEFAULT ''",
+            "auth_port": "INTEGER DEFAULT 22",
+        },
+        "findings": {
+            "fix_config": "TEXT DEFAULT ''",
+            "fix_steps": "TEXT DEFAULT ''",
+        },
+    }
+    with engine.begin() as conn:
+        for table, cols in add_cols.items():
+            try:
+                existing = {r[1] for r in conn.execute(text(f"PRAGMA table_info({table})"))}
+            except Exception:  # noqa: BLE001
+                continue
+            for col, ddl in cols.items():
+                if col not in existing:
+                    try:
+                        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}"))
+                    except Exception:  # noqa: BLE001
+                        pass

@@ -28,6 +28,8 @@ def create_target(body: TargetCreate, db: Session = Depends(get_db), user: User 
         label=body.label, value=value, kind=body.kind, engagement=body.engagement,
         authorized=body.authorized, authorization_ref=body.authorization_ref,
         scope_extra=extra, notes=body.notes,
+        auth_type=body.auth_type, auth_user=body.auth_user,
+        auth_secret=body.auth_secret, auth_port=body.auth_port,
     )
     db.add(t)
     db.commit()

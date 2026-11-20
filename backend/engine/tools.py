@@ -120,10 +120,12 @@ _register(Tool(
 # ---------------------------------------------------------------- VA
 _register(Tool(
     name="nmap", binary="nmap", category="va", intensity="active",
-    description="Port/service scan. Options: ports (e.g. '80,443' or 'top1000'), sv (service/version detect).",
+    description="Port/service scan. Options: ports ('80,443' or 'top1000'), sv (version detect), "
+                "scripts (NSE category e.g. 'vuln' or 'default,vuln,safe').",
     build=lambda host, o: (
         ["nmap", "-Pn", "-T4"]
         + (["-sV"] if o.get("sv") else [])
+        + (["--script", _clean(o["scripts"])] if o.get("scripts") else [])
         + (["-p", _clean(o["ports"])] if o.get("ports") and o["ports"] != "top1000" else ["--top-ports", "1000"])
         + [host]
     ),

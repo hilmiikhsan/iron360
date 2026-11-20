@@ -46,6 +46,11 @@ class Target(Base):
     # Additional in-scope hosts allowed for THIS workspace (subdomains/IPs), JSON list.
     scope_extra: Mapped[list] = mapped_column(JSON, default=list)
     notes: Mapped[str] = mapped_column(Text, default="")
+    # Optional credentials for AUTHENTICATED (credentialed) VA — stored only in the local DB.
+    auth_type: Mapped[str] = mapped_column(String(16), default="none")   # none | ssh_password | ssh_key
+    auth_user: Mapped[str] = mapped_column(String(64), default="")
+    auth_secret: Mapped[str] = mapped_column(Text, default="")           # password or private key (local only)
+    auth_port: Mapped[int] = mapped_column(Integer, default=22)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     scans: Mapped[list["Scan"]] = relationship(back_populates="target", cascade="all, delete-orphan")
