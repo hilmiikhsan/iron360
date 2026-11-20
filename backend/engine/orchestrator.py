@@ -207,9 +207,21 @@ def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
         exploits = exploitdb.correlate(nmap_out)
         if exploits:
             emit({"type": "reasoning", "text": f"Exploit-DB: {len(exploits)} candidate public exploit(s) matched to detected service versions."})
+            emit({"type": "intel", "kind": "exploit-db", "items": exploits})
             collected.append(("exploit-db", "exploit-db correlation",
                               "\n".join(f"[{e['date']}] {e['description']} ({e['type']}/{e['platform']}) — {e['url']}"
                                         for e in exploits)))
+
+    # CVE tagging + NVD enrichment (from nuclei/service/exploit-db output)
+    if not _stopped(stop_event):
+        from . import cve
+        all_text = "\n".join(out for (_, _, out) in collected)
+        cves = cve.enrich(all_text, limit=6)
+        if cves:
+            emit({"type": "reasoning", "text": f"CVE intel: {len(cves)} CVE(s) identified; enriched with NVD CVSS."})
+            emit({"type": "intel", "kind": "cve", "items": cves})
+            collected.append(("cve-intel", "nvd enrichment",
+                              "\n".join(f"{c['cve']} CVSS {c['cvss']} ({c['severity']}): {c['summary']}" for c in cves)))
 
     # Active payload testing — prove candidates (reflected XSS / SQLi / LFI) with evidence
     if mode == "pentest" and autonomy == "auto" and not _stopped(stop_event) and any(
@@ -261,6 +273,9 @@ def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
 
     emit({"type": "reasoning", "text": "Analyzing all collected output with Claude + extracting validated findings…"})
     findings = _ai_extract_findings(target, collected, emit)
+    if findings and not _stopped(stop_event):
+        emit({"type": "reasoning", "text": "Anti-false-positive pass: adversarially challenging each finding before reporting…"})
+        findings = _verify_findings(target, findings, emit)
     for f in findings:
         on_finding(f)
         emit({"type": "finding", "finding": f})
@@ -337,6 +352,54 @@ def _ai_extract_findings(target: Target, collected: list[tuple[str, str, str]], 
     except Exception as e:  # noqa: BLE001
         emit({"type": "note", "text": f"AI analysis error: {e}"})
         return []
+
+
+_VERIFY_SYSTEM = """You are an adversarial QA reviewer on an RSA VAPT team. You are given a list of
+draft findings (with their evidence). Your job is to reduce false positives: for EACH finding decide whether
+its evidence genuinely supports it.
+- If the evidence is a reproduced PoC (reflected payload, SQL error, differential, /etc/passwd content), keep
+  'confirmed'. If it's only a scanner hit with no proof, downgrade to 'likely' or 'needs_review' and lower confidence.
+- If the evidence does not support the claim at all, set status 'false_positive'.
+- Append a one-sentence verification note to 'description' prefixed with 'VERIFY: '.
+Reply with ONLY a JSON array of the SAME findings (same fields) with adjusted status/confidence/description."""
+
+
+def _verify_findings(target: Target, findings: list[dict], emit: Emit) -> list[dict]:
+    """Second AI pass that challenges each finding to cut false positives."""
+    from . import llm
+    try:
+        slim = [{"title": f["title"], "severity": f["severity"], "status": f["status"],
+                 "confidence": f["confidence"], "evidence": f.get("evidence", ""),
+                 "affected": f.get("affected", "")} for f in findings]
+        client = llm.make_client()
+        resp = client.messages.create(
+            model=settings.ai_model, max_tokens=4000, system=_VERIFY_SYSTEM,
+            thinking={"type": "adaptive"},
+            messages=[{"role": "user", "content": "Findings to review:\n" + json.dumps(slim, indent=1)}],
+        )
+        if resp.stop_reason == "refusal":
+            return findings
+        text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
+        text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        s, e = text.find("["), text.rfind("]")
+        verdicts = json.loads(text[s:e + 1]) if s != -1 and e != -1 else []
+        by_title = {v.get("title"): v for v in verdicts if isinstance(v, dict)}
+        out = []
+        dropped = 0
+        for f in findings:
+            v = by_title.get(f["title"])
+            if v:
+                f = {**f, "status": v.get("status", f["status"]),
+                     "confidence": int(v.get("confidence", f["confidence"]) or f["confidence"]),
+                     "description": v.get("description", f["description"])}
+            if f["status"] == "false_positive":
+                dropped += 1
+            out.append(f)
+        if dropped:
+            emit({"type": "reasoning", "text": f"Verification dropped {dropped} finding(s) as false positive."})
+        return out
+    except Exception:  # noqa: BLE001
+        return findings
 
 
 # ------------------------------------------------------------------ simulation

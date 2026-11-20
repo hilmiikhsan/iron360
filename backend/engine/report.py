@@ -86,7 +86,33 @@ def _finding_block(f: Finding, idx: int) -> str:
     </div>"""
 
 
-def build_report_html(target: Target, findings: list[Finding], summary: str) -> str:
+def _intel_html(intel: dict | None) -> str:
+    if not intel:
+        return ""
+    html_parts = []
+    cves = intel.get("cve") or []
+    if cves:
+        rows = "".join(
+            f"<tr><td><a href='{_esc(c.get('url',''))}'>{_esc(c.get('cve',''))}</a></td>"
+            f"<td>{_esc(str(c.get('cvss') or '—'))}</td><td>{_esc(c.get('severity') or '—')}</td>"
+            f"<td>{_esc((c.get('summary') or '')[:200])}</td></tr>" for c in cves)
+        html_parts.append(
+            '<h2 class="sec">Intelijen CVE (NVD)</h2><table class="info"><tr><th>CVE</th><th>CVSS</th>'
+            f'<th>Severity</th><th>Ringkasan</th></tr>{rows}</table>')
+    exps = intel.get("exploit-db") or []
+    if exps:
+        rows = "".join(
+            f"<tr><td><a href='{_esc(e.get('url',''))}'>{_esc(e.get('description',''))}</a></td>"
+            f"<td>{_esc(e.get('type',''))}/{_esc(e.get('platform',''))}</td><td>{_esc(e.get('date',''))}</td></tr>"
+            for e in exps)
+        html_parts.append(
+            '<h2 class="sec">Korelasi Exploit-DB</h2><p class="muted">Exploit publik yang cocok dengan versi '
+            f'service yang terdeteksi.</p><table class="info"><tr><th>Exploit</th><th>Tipe/Platform</th>'
+            f'<th>Tanggal</th></tr>{rows}</table>')
+    return "".join(html_parts)
+
+
+def build_report_html(target: Target, findings: list[Finding], summary: str, intel: dict | None = None) -> str:
     findings = sorted(findings, key=lambda f: (_SEV_ORDER.get(f.severity, 9), -f.confidence))
     counts = {s: sum(1 for f in findings if f.severity == s) for s in _SEV_ORDER}
     today = dt.date.today().strftime("%d %B %Y")
@@ -158,6 +184,8 @@ def build_report_html(target: Target, findings: list[Finding], summary: str) -> 
 
  <h2 class="sec">Temuan Rinci</h2>
  {blocks}
+
+ {_intel_html(intel)}
 
  <div class="foot">Dokumen ini bersifat rahasia dan ditujukan untuk {_esc(target.engagement) or 'klien'} dalam
    kerangka engagement resmi RSA. Seluruh pengujian dilakukan dalam lingkup yang diautorisasi. Validasi akhir
