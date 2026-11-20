@@ -57,6 +57,18 @@ class Settings:
         self.db_url: str = f"sqlite:///{DATA_DIR / 'iron360.db'}"
         self.evidence_dir: Path = DATA_DIR / "evidence"
         self.evidence_dir.mkdir(exist_ok=True)
+        self.wordlists_dir: Path = DATA_DIR / "wordlists"
+
+    def wordlist(self, *names: str) -> str:
+        """Resolve the first existing wordlist among the given names, with fallbacks."""
+        for n in names:
+            p = self.wordlists_dir / n
+            if p.exists():
+                return str(p)
+        for p in ("/usr/share/wordlists/dirb/common.txt", "/usr/share/dirb/wordlists/common.txt"):
+            if Path(p).exists():
+                return p
+        return str(self.wordlists_dir / (names[0] if names else "common.txt"))
 
     def _resolve_jwt_secret(self) -> str:
         env_secret = os.getenv("IRON360_JWT_SECRET")

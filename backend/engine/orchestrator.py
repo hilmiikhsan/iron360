@@ -131,6 +131,11 @@ def _phases(target: Target, mode: str) -> list[tuple[str, list[tuple[str, str, d
             ("sslscan", host, {}, "TLS/SSL protocol + cipher audit"),
         ]),
     ]
+    if mode == "pentest":
+        phases.append(("Content discovery", [
+            ("ffuf", host, {}, "Directory/file brute-force (seclists)"),
+            ("arjun", host, {}, "Discover hidden parameters"),
+        ]))
     return phases
 
 

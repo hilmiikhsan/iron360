@@ -17,7 +17,7 @@ from ..config import DATA_DIR
 
 CORPUS = DATA_DIR / "kb_corpus"
 # md-heavy sources worth indexing as prose/payloads
-_SOURCES = ["payloads", "bb-writeups", "fuzzyai"]
+_SOURCES = ["payloads", "bb-writeups", "fuzzyai", "hacktricks"]
 _TOKEN = re.compile(r"[a-zA-Z0-9_]{3,}")
 
 _INDEX: dict | None = None

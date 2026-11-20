@@ -12,6 +12,16 @@ import shutil
 from dataclasses import dataclass, field
 from typing import Callable
 
+from ..config import get_settings
+
+_settings = get_settings()
+
+
+def _content_wordlist(o: dict) -> str:
+    if o.get("wordlist"):
+        return _clean(o["wordlist"])
+    return _settings.wordlist("raft-small-directories.txt", "common.txt")
+
 # Characters permitted in free-form option values (paths, wordlist names, params).
 _SAFE_VALUE = re.compile(r"^[A-Za-z0-9._\-/=:,%&?]{0,200}$")
 
@@ -151,9 +161,23 @@ _register(Tool(
     description="Content/endpoint fuzzing. Option: wordlist (absolute path). FUZZ keyword appended to URL path.",
     build=lambda host, o: [
         "ffuf", "-s", "-mc", "200,204,301,302,307,401,403",
-        "-w", _clean(o["wordlist"]) if o.get("wordlist") else "/usr/share/wordlists/common.txt",
+        "-w", _content_wordlist(o),
         "-u", f"{_url(host, o)}/FUZZ",
     ],
+    needs_scheme=True,
+))
+
+_register(Tool(
+    name="gobuster", binary="gobuster", category="exploit", intensity="intrusive",
+    description="Directory/file brute-force. Option: wordlist (absolute path).",
+    build=lambda host, o: ["gobuster", "dir", "-q", "-t", "30", "-u", _url(host, o), "-w", _content_wordlist(o)],
+    needs_scheme=True,
+))
+
+_register(Tool(
+    name="arjun", binary="arjun", category="exploit", intensity="intrusive",
+    description="Discover hidden HTTP parameters (GET/POST) on a URL.",
+    build=lambda host, o: ["arjun", "-u", _url(host, o), "-m", "GET", "-q"],
     needs_scheme=True,
 ))
 
@@ -180,7 +204,7 @@ _register(Tool(
     name="feroxbuster", binary="feroxbuster", category="exploit", intensity="intrusive",
     description="Recursive content/endpoint discovery. Option: wordlist (absolute path).",
     build=lambda host, o: ["feroxbuster", "-u", _url(host, o), "--silent", "-d", "2", "-t", "30",
-                           "-w", _clean(o["wordlist"]) if o.get("wordlist") else "/usr/share/seclists/Discovery/Web-Content/common.txt"],
+                           "-w", _content_wordlist(o)],
     needs_scheme=True,
 ))
 
