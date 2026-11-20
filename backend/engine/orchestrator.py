@@ -211,6 +211,23 @@ def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
                               "\n".join(f"[{e['date']}] {e['description']} ({e['type']}/{e['platform']}) — {e['url']}"
                                         for e in exploits)))
 
+    # Active payload testing — prove candidates (reflected XSS / SQLi / LFI) with evidence
+    if mode == "pentest" and autonomy == "auto" and not _stopped(stop_event) and any(
+            cats.get(c) for c in ("xss", "sqli", "lfi")):
+        from . import probe
+        emit({"type": "step", "n": n + 1, "tool": "payload-probe", "status": "running",
+              "text": "Active payload testing on gf candidates"})
+        proven = probe.run_probes(target, cats, emit, stop_event)
+        for f in proven:
+            on_finding(f)
+            emit({"type": "finding", "finding": f})
+        emit({"type": "step", "n": n + 1, "tool": "payload-probe", "status": "done",
+              "text": f"Payload testing — {len(proven)} confirmed"})
+        n += 1
+    elif mode == "pentest" and autonomy != "auto" and any(cats.get(c) for c in ("xss", "sqli", "lfi")):
+        emit({"type": "approval_required", "tool": "payload-probe",
+              "text": "Active payload testing (XSS/SQLi/LFI probes) held for operator approval."})
+
     # Targeted intrusive validation on the best gf candidates (pentest mode only)
     if mode == "pentest" and not _stopped(stop_event):
         for tname, cand in (("sqlmap", cats["sqli"]), ("dalfox", cats["xss"])):
