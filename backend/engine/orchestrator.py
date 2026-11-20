@@ -31,21 +31,79 @@ Emit = Callable[[dict], None]
 def _stopped(ev: threading.Event | None) -> bool:
     return ev is not None and ev.is_set()
 
-ANALYST_SYSTEM = """You are Iron360, a senior VAPT analyst at RSA. You are given the raw output of
-security scanners that were run against an AUTHORIZED, in-scope target during a signed engagement.
-Your job is to ANALYZE that output and produce a clean, honest findings list.
+ANALYST_SYSTEM = """You are Iron360, a senior VAPT analyst at RSA, trained on a bug-bounty methodology
+("3 Bugs That Pay", OWASP WSTG, HackTricks). You are given the raw output of security tools run against an
+AUTHORIZED, in-scope target during a signed engagement — recon, live hosts, merged+deduped URLs, parameter
+candidates already categorized by gf-style patterns (sqli/xss/lfi/ssrf/redirect), sensitive files, JS files,
+port/service output, and vuln-scanner output. ANALYZE it and produce a clean, honest findings list.
+
+Methodology to apply when reading the output:
+- URLs with parameters are the prime injection surface. Parameters matching sqli patterns on .php/.asp/.jsp
+  endpoints are SQLi candidates; reflected params are XSS candidates; file/path params are LFI/traversal.
+- Exposed sensitive files (.env/.sql/.bak/.config/.git) are information-disclosure findings.
+- JS files may leak endpoints/secrets — flag for manual review.
+- Open ports/services (from nmap) → map to service-specific risks (outdated version, default creds, exposed admin).
+- Corroborate across tools; a single low-signal hit is 'needs_review', not 'confirmed'.
 
 Rules:
-- Only report what the tool output actually supports. Do NOT invent vulnerabilities.
-- status: 'confirmed' ONLY if the output contains direct evidence/PoC; otherwise 'likely' or 'needs_review'.
-- Give an honest confidence (0-100). Prefer multi-tool corroboration.
-- remediation must be CONCRETE: `fix_config` is the actual copy-pasteable config/code for the DETECTED
-  stack (real nginx/apache directive, real parameterized query, exact header/cipher line), and `fix_steps`
-  says how to apply + verify. Never vague advice.
+- Only report what the tool output actually supports. Do NOT invent vulnerabilities or fabricate PoCs.
+- status: 'confirmed' ONLY with direct evidence/PoC in the output (e.g. sqlmap/dalfox positive); else 'likely'/'needs_review'.
+- Honest confidence (0-100).
+- remediation must be CONCRETE: `fix_config` is the actual copy-pasteable config/code for the DETECTED stack
+  (real nginx/apache directive, real parameterized query, exact header/cipher line); `fix_steps` = apply + verify. Never vague.
 - Reply with ONLY a JSON array (no prose, no markdown fences). Each item:
   {"title","severity":"critical|high|medium|low|info","status":"confirmed|likely|needs_review",
    "confidence":int,"affected","cve","description","evidence","remediation","fix_config","fix_steps",
    "sources":[tool names]}."""
+
+# gf-style parameter patterns (from tomnomnom/gf) — applied in Python to the merged URL list,
+# so the "parameter extraction + gf pattern tagging" methodology runs with no extra tools installed.
+_GF_PARAMS = {
+    "sqli": {"id", "select", "report", "role", "update", "query", "user", "name", "sort", "where",
+             "search", "params", "process", "row", "view", "table", "from", "sel", "results", "sleep",
+             "fetch", "order", "keyword", "column", "field", "delete", "string", "number", "filter", "cat", "page"},
+    "xss": {"q", "s", "search", "id", "action", "keyword", "query", "page", "keywords", "year", "view",
+            "email", "type", "name", "p", "month", "image", "order", "dir", "title", "data", "redirect"},
+    "lfi": {"file", "document", "folder", "root", "path", "pg", "style", "pdf", "template", "doc", "page",
+            "cat", "dir", "action", "board", "download", "prefix", "include", "inc", "locate", "show",
+            "site", "view", "content", "layout", "mod", "conf", "url"},
+    "ssrf": {"url", "uri", "path", "dest", "redirect", "out", "view", "to", "image", "link", "request",
+             "u", "go", "domain", "feed", "host", "site", "html", "callback", "return", "port", "proxy", "next"},
+    "redirect": {"url", "redirect", "next", "return", "r", "u", "link", "goto", "dest", "destination",
+                 "go", "out", "target", "rurl", "continue", "returnurl"},
+}
+_SENSITIVE_EXT = (".env", ".sql", ".bak", ".old", ".backup", ".config", ".conf", ".ini", ".yml", ".yaml",
+                  ".git", ".zip", ".tar.gz", ".tgz", ".db", ".log", ".json", ".xml", ".properties", ".pem", ".key")
+
+
+def _param_names(url: str) -> set[str]:
+    try:
+        q = url.split("?", 1)[1]
+    except IndexError:
+        return set()
+    return {kv.split("=", 1)[0].lower() for kv in q.replace("&", ";").split(";") if "=" in kv}
+
+
+def categorize_urls(urls: list[str]) -> dict[str, list[str]]:
+    """Parameter extraction + gf-style tagging + sensitive-file / JS detection (the ebook flow)."""
+    out: dict[str, list[str]] = {k: [] for k in _GF_PARAMS}
+    out["params"] = []
+    out["sensitive_files"] = []
+    out["js"] = []
+    for u in urls:
+        low = u.lower()
+        path = low.split("?", 1)[0]
+        if path.endswith(".js"):
+            out["js"].append(u)
+        if any(path.endswith(ext) or ext + "?" in low or path.endswith("/.git") for ext in _SENSITIVE_EXT):
+            out["sensitive_files"].append(u)
+        if "?" in u and "=" in u:
+            out["params"].append(u)
+            names = _param_names(u)
+            for cat, pats in _GF_PARAMS.items():
+                if names & pats:
+                    out[cat].append(u)
+    return {k: sorted(set(v)) for k, v in out.items()}
 
 
 # ------------------------------------------------------------------ pipeline
@@ -121,36 +179,44 @@ def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
             else:
                 emit({"type": "step", "n": n, "tool": tool_name, "status": "failed", "text": res.denied_reason or "failed"})
 
-    # Merge + dedupe (the "combine results, remove duplicates" step)
+    # Merge + dedupe + parameter extraction + gf-pattern tagging (3 Bugs methodology)
     uniq_urls = sorted({u for u in url_lines if u.startswith("http")})
     uniq_subs = sorted(set(sub_lines))
-    if url_lines:
-        emit({"type": "reasoning", "text": f"Merged URLs (gau+katana): {len(url_lines)} raw → {len(uniq_urls)} unique after dedupe."})
-        collected.append(("merged-urls", "merge + dedupe", "\n".join(uniq_urls[:400])))
-    if sub_lines:
+    cats = categorize_urls(uniq_urls)
+    if uniq_urls:
+        emit({"type": "reasoning", "text":
+              f"Merged URLs: {len(url_lines)} raw → {len(uniq_urls)} unique (deduped). "
+              f"Params: {len(cats['params'])} · SQLi-cand: {len(cats['sqli'])} · XSS-cand: {len(cats['xss'])} · "
+              f"LFI-cand: {len(cats['lfi'])} · sensitive files: {len(cats['sensitive_files'])} · JS: {len(cats['js'])}"})
+        collected.append(("merged-urls", "merge+dedupe", "\n".join(uniq_urls[:300])))
+        for cat in ("sqli", "xss", "lfi", "ssrf", "redirect", "sensitive_files", "js"):
+            if cats.get(cat):
+                collected.append((f"{cat}-candidates", "gf-pattern/python", "\n".join(cats[cat][:60])))
+    if uniq_subs:
         emit({"type": "reasoning", "text": f"Subdomains discovered: {len(uniq_subs)} unique."})
 
-    # Intrusive validation (pentest mode) on a discovered parameterized URL
+    # Targeted intrusive validation on the best gf candidates (pentest mode only)
     if mode == "pentest" and not _stopped(stop_event):
-        param_url = next((u for u in uniq_urls if "?" in u and "=" in u and host in u), "")
-        if param_url:
-            for tname in ("sqlmap", "dalfox"):
-                tool = tools.REGISTRY.get(tname)
-                if not tool or not tool.installed:
-                    continue
-                if autonomy != "auto":
-                    emit({"type": "approval_required", "tool": tname,
-                          "text": f"Intrusive {tname} on {param_url} held for operator approval."})
-                    continue
-                n += 1
-                emit({"type": "reasoning", "text": f"Validating with {tname} on discovered parameter: {param_url}"})
-                res = executor.run(target, tname, host, {"param_url": param_url}, stop_event)
-                emit({"type": "exec", "tool": tname, "host": param_url, "command": res.command,
-                      "ok": res.ok, "exit_code": res.exit_code, "denied_reason": res.denied_reason,
-                      "output": (res.stdout or res.stderr or res.denied_reason or "")[:6000],
-                      "duration_s": round(res.duration_s, 1)})
-                if res.ok:
-                    collected.append((tname, res.command, res.stdout or ""))
+        for tname, cand in (("sqlmap", cats["sqli"]), ("dalfox", cats["xss"])):
+            tool = tools.REGISTRY.get(tname)
+            if not tool or not tool.installed or not cand:
+                continue
+            purl = next((u for u in cand if host in u), cand[0])
+            if autonomy != "auto":
+                emit({"type": "approval_required", "tool": tname,
+                      "text": f"Intrusive {tname} on {purl} held for operator approval."})
+                continue
+            if _stopped(stop_event):
+                break
+            n += 1
+            emit({"type": "reasoning", "text": f"Validating {tname} on gf-{tname} candidate: {purl}"})
+            res = executor.run(target, tname, host, {"param_url": purl}, stop_event)
+            emit({"type": "exec", "tool": tname, "host": purl, "command": res.command,
+                  "ok": res.ok, "exit_code": res.exit_code, "denied_reason": res.denied_reason,
+                  "output": (res.stdout or res.stderr or res.denied_reason or "")[:6000],
+                  "duration_s": round(res.duration_s, 1)})
+            if res.ok:
+                collected.append((tname, res.command, res.stdout or ""))
 
     if _stopped(stop_event):
         emit({"type": "finish", "text": "Assessment stopped by operator."})
