@@ -33,6 +33,8 @@ class Tool:
     # builder(host, options) -> argv list. Must only use sanitized values.
     build: Callable[[str, dict], list[str]]
     needs_scheme: bool = False  # host should be presented as URL (http/https)
+    # optional stdin(host, options) -> str for tools that read targets on stdin
+    stdin: Callable[[str, dict], str] | None = None
 
     @property
     def installed(self) -> bool:
@@ -60,8 +62,9 @@ _register(Tool(
 
 _register(Tool(
     name="dnsx", binary="dnsx", category="recon", intensity="passive",
-    description="Resolve hosts / DNS records (A, CNAME, etc.).",
-    build=lambda host, o: ["dnsx", "-silent", "-a", "-resp", "-d", host],
+    description="Resolve a host's DNS records (A, CNAME) — host supplied on stdin.",
+    build=lambda host, o: ["dnsx", "-silent", "-a", "-cname", "-resp"],
+    stdin=lambda host, o: host + "\n",
 ))
 
 _register(Tool(

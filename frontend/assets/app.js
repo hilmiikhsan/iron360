@@ -493,9 +493,13 @@ function handleEvent(e) {
 
 async function stopScan() {
   if (!State.scan) return;
-  try { await api(`/api/scans/${State.scan.id}/stop`, { method: "POST" }); } catch (_) {}
-  if (State.ws) try { State.ws.close(); } catch (_) {}
+  // Respond instantly: flip buttons + close the stream before the API round-trip.
   $("#startBtn").disabled = false; $("#stopBtn").disabled = true;
+  addTimeline("note", "Stopping… killing running tool.");
+  const sid = State.scan.id;
+  if (State.ws) { try { State.ws.close(); } catch (_) {} State.ws = null; }
+  try { await api(`/api/scans/${sid}/stop`, { method: "POST" }); } catch (_) {}
+  toast("Assessment stopped");
 }
 
 /* ----------------------------- Findings ----------------------------- */

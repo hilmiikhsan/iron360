@@ -60,6 +60,7 @@ def stop_scan(scan_id: int, db: Session = Depends(get_db), user: User = Depends(
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
     if scan.status in {"queued", "running"}:
+        runner.request_stop(scan_id)  # signal the running thread to kill its subprocess and abort
         scan.status = "stopped"
         db.commit()
         record(db, actor=user.username, action="scan_stop", detail=f"scan_id={scan_id}")

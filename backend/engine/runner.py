@@ -18,7 +18,15 @@ from . import orchestrator
 _subscribers: dict[int, set[asyncio.Queue]] = defaultdict(set)
 # scan_id -> accumulated events (so a late subscriber can replay)
 _history: dict[int, list[dict]] = defaultdict(list)
+# scan_id -> stop signal (set when the operator presses Stop)
+_stop_events: dict[int, threading.Event] = {}
 _loop: asyncio.AbstractEventLoop | None = None
+
+
+def request_stop(scan_id: int) -> None:
+    ev = _stop_events.get(scan_id)
+    if ev is not None:
+        ev.set()
 
 
 def bind_loop(loop: asyncio.AbstractEventLoop) -> None:
@@ -64,6 +72,8 @@ def _run(scan_id: int) -> None:
         scan.timeline = []
         db.commit()
 
+        stop_event = threading.Event()
+        _stop_events[scan_id] = stop_event
         timeline: list[dict] = []
 
         def emit(event: dict) -> None:
@@ -90,16 +100,16 @@ def _run(scan_id: int) -> None:
             db.commit()
 
         summary = orchestrator.run_assessment(
-            target, scan.mode, scan.autonomy, emit, on_finding
+            target, scan.mode, scan.autonomy, emit, on_finding, stop_event
         )
 
         scan.summary = summary
         scan.timeline = timeline
-        scan.status = "done"
+        scan.status = "stopped" if stop_event.is_set() else "done"
         from datetime import datetime, timezone
         scan.finished_at = datetime.now(timezone.utc)
         db.commit()
-        _publish(scan_id, {"type": "done", "summary": summary})
+        _publish(scan_id, {"type": "done", "summary": summary, "stopped": stop_event.is_set()})
     except Exception as e:  # noqa: BLE001
         scan = db.get(Scan, scan_id)
         if scan:
@@ -108,4 +118,5 @@ def _run(scan_id: int) -> None:
             db.commit()
         _publish(scan_id, {"type": "error", "text": str(e)})
     finally:
+        _stop_events.pop(scan_id, None)
         db.close()

@@ -6,14 +6,19 @@ Guarantees enforced here, in order, before any process starts:
   3. the host is authorized + in-scope for the target (scope.check)
   4. for URL/param tools, the host *inside* the URL is also in-scope
   5. argv is a list (no shell), built only from sanitized options
-Everything is timed out, captured, written to an evidence file, and audited.
+
+Processes run under Popen with reader threads (so large output never deadlocks),
+an overall timeout, and a cooperative `stop_event` — when the operator presses
+Stop, the running process is killed immediately.
 """
 from __future__ import annotations
 
 import datetime as dt
 import subprocess
+import threading
+import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..config import get_settings
@@ -37,15 +42,15 @@ class ExecResult:
     duration_s: float = 0.0
 
 
-def _extract_hosts(tool: tools.Tool, host: str, options: dict) -> list[str]:
-    """All hosts this invocation will touch, for scope checking."""
+def _extract_hosts(host: str, options: dict) -> list[str]:
     hosts = [host]
-    if "param_url" in options and options.get("param_url"):
+    if options.get("param_url"):
         hosts.append(scope.normalize_host(options["param_url"]))
     return hosts
 
 
-def run(target: Target, tool_name: str, host: str, options: dict | None = None) -> ExecResult:
+def run(target: Target, tool_name: str, host: str, options: dict | None = None,
+        stop_event: threading.Event | None = None) -> ExecResult:
     options = options or {}
 
     if not settings.executor_enabled:
@@ -57,48 +62,94 @@ def run(target: Target, tool_name: str, host: str, options: dict | None = None) 
     if not tool.installed:
         return ExecResult(False, tool_name, host, "", denied_reason=f"tool '{tool_name}' ({tool.binary}) not installed on executor host")
 
-    # Scope check every host involved.
-    for h in _extract_hosts(tool, host, options):
+    for h in _extract_hosts(host, options):
         decision = scope.check(target, h)
         if not decision.allowed:
             return ExecResult(False, tool_name, host, "", denied_reason=decision.reason)
 
-    # Build argv (may raise ValueError on bad options → treated as denial).
+    norm_host = scope.normalize_host(host)
     try:
-        argv = tool.build(scope.normalize_host(host), options)
+        argv = tool.build(norm_host, options)
+        stdin_data = tool.stdin(norm_host, options) if tool.stdin else None
     except (ValueError, KeyError) as e:
         return ExecResult(False, tool_name, host, "", denied_reason=f"option validation failed: {e}")
 
     command = " ".join(argv)
-    started = dt.datetime.now()
+    started = time.time()
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             argv,
-            capture_output=True,
-            text=True,
-            timeout=settings.tool_timeout,
-            shell=False,  # critical: never a shell
-            check=False,
+            stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
-        stdout, stderr, code = proc.stdout, proc.stderr, proc.returncode
-        ok = True
-    except subprocess.TimeoutExpired:
-        return ExecResult(False, tool_name, host, command,
-                          denied_reason=f"timed out after {settings.tool_timeout}s")
-    except Exception as e:  # noqa: BLE001 — surface any spawn failure as a non-ok result
+    except Exception as e:  # noqa: BLE001
         return ExecResult(False, tool_name, host, command, denied_reason=f"spawn error: {e}")
 
-    duration = (dt.datetime.now() - started).total_seconds()
+    out_buf: list[str] = []
+    err_buf: list[str] = []
 
-    # Persist evidence.
-    ev_path = settings.evidence_dir / f"{tool_name}_{scope.normalize_host(host)}_{uuid.uuid4().hex[:8]}.txt"
+    def _drain(stream, buf):
+        try:
+            for line in stream:
+                buf.append(line)
+        except Exception:  # noqa: BLE001
+            pass
+
+    t_out = threading.Thread(target=_drain, args=(proc.stdout, out_buf), daemon=True)
+    t_err = threading.Thread(target=_drain, args=(proc.stderr, err_buf), daemon=True)
+    t_out.start()
+    t_err.start()
+
+    if stdin_data is not None:
+        try:
+            proc.stdin.write(stdin_data)
+            proc.stdin.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    cancelled = timed_out = False
+    while True:
+        try:
+            proc.wait(timeout=0.3)
+            break
+        except subprocess.TimeoutExpired:
+            pass
+        if stop_event is not None and stop_event.is_set():
+            cancelled = True
+            proc.kill()
+            break
+        if time.time() - started > settings.tool_timeout:
+            timed_out = True
+            proc.kill()
+            break
+
+    try:
+        proc.wait(timeout=3)
+    except Exception:  # noqa: BLE001
+        pass
+    t_out.join(timeout=2)
+    t_err.join(timeout=2)
+
+    stdout = "".join(out_buf)
+    stderr = "".join(err_buf)
+    duration = time.time() - started
+
+    if cancelled:
+        return ExecResult(False, tool_name, host, command, stdout=stdout[:20000], stderr=stderr[:4000],
+                          denied_reason="stopped by operator", duration_s=duration)
+    if timed_out:
+        return ExecResult(False, tool_name, host, command, denied_reason=f"timed out after {settings.tool_timeout}s",
+                          duration_s=duration)
+
+    code = proc.returncode
+    ev_path = settings.evidence_dir / f"{tool_name}_{norm_host}_{uuid.uuid4().hex[:8]}.txt"
     try:
         ev_path.write_text(f"$ {command}\n\n[exit {code}] [{duration:.1f}s]\n\n--- STDOUT ---\n{stdout}\n\n--- STDERR ---\n{stderr}")
     except OSError:
         ev_path = Path("")
 
     return ExecResult(
-        ok=ok, tool=tool_name, host=host, command=command,
+        ok=True, tool=tool_name, host=host, command=command,
         stdout=stdout[:20000], stderr=stderr[:4000], exit_code=code,
         evidence_path=str(ev_path), duration_s=duration,
     )

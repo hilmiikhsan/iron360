@@ -16,6 +16,7 @@ Events pushed to emit(event); the frontend renders plan/step/exec/reasoning/find
 from __future__ import annotations
 
 import json
+import threading
 import time
 from typing import Callable
 
@@ -25,6 +26,10 @@ from . import executor, knowledge, tools
 
 settings = get_settings()
 Emit = Callable[[dict], None]
+
+
+def _stopped(ev: threading.Event | None) -> bool:
+    return ev is not None and ev.is_set()
 
 ANALYST_SYSTEM = """You are Iron360, a senior VAPT analyst at RSA. You are given the raw output of
 security scanners that were run against an AUTHORIZED, in-scope target during a signed engagement.
@@ -58,7 +63,7 @@ def _pipeline(target: Target, mode: str) -> list[tuple[str, str, dict, str]]:
 
 
 def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
-              on_finding: Callable[[dict], None]) -> str:
+              on_finding: Callable[[dict], None], stop_event: threading.Event | None = None) -> str:
     host = target.value
     steps = _pipeline(target, mode)
 
@@ -68,13 +73,17 @@ def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
 
     collected: list[tuple[str, str, str]] = []
     for i, (tool_name, h, opts, desc) in enumerate(steps, 1):
+        if _stopped(stop_event):
+            emit({"type": "note", "text": "Stopped by operator."})
+            emit({"type": "finish", "text": "Assessment stopped by operator."})
+            return "Stopped by operator."
         tool = tools.REGISTRY.get(tool_name)
         if not tool or not tool.installed:
             emit({"type": "step", "n": i, "tool": tool_name, "status": "skipped",
                   "text": f"{desc} — {tool_name} not installed on executor, skipped"})
             continue
         emit({"type": "step", "n": i, "tool": tool_name, "status": "running", "text": desc})
-        res = executor.run(target, tool_name, h, opts)
+        res = executor.run(target, tool_name, h, opts, stop_event)
         emit({
             "type": "exec", "tool": tool_name, "host": h, "command": res.command,
             "ok": res.ok, "exit_code": res.exit_code, "denied_reason": res.denied_reason,
@@ -88,6 +97,10 @@ def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
         else:
             emit({"type": "step", "n": i, "tool": tool_name, "status": "failed",
                   "text": res.denied_reason or "failed"})
+
+    if _stopped(stop_event):
+        emit({"type": "finish", "text": "Assessment stopped by operator."})
+        return "Stopped by operator."
 
     if not collected:
         emit({"type": "note", "text": "No executor tools available on this host. "
@@ -161,7 +174,7 @@ def _ai_extract_findings(target: Target, collected: list[tuple[str, str, str]], 
 
 # ------------------------------------------------------------------ simulation
 def _run_sim(target: Target, mode: str, autonomy: str, emit: Emit,
-             on_finding: Callable[[dict], None]) -> str:
+             on_finding: Callable[[dict], None], stop_event: threading.Event | None = None) -> str:
     host = target.value
     plan = [
         ("subfinder", "Enumerate subdomains (passive)"),
@@ -173,7 +186,11 @@ def _run_sim(target: Target, mode: str, autonomy: str, emit: Emit,
     emit({"type": "plan", "steps": [{"n": i + 1, "tool": t, "desc": d} for i, (t, d) in enumerate(plan)]})
 
     def step(delay, ev):
+        if _stopped(stop_event):
+            return
         time.sleep(delay)
+        if _stopped(stop_event):
+            return
         emit(ev)
 
     step(0.2, {"type": "reasoning", "text": f"Planning {mode.upper()} for in-scope target {host}. Starting passive recon."})
@@ -234,12 +251,12 @@ def _run_sim(target: Target, mode: str, autonomy: str, emit: Emit,
 
 # ------------------------------------------------------------------ entry point
 def run_assessment(target: Target, mode: str, autonomy: str, emit: Emit,
-                   on_finding: Callable[[dict], None]) -> str:
+                   on_finding: Callable[[dict], None], stop_event: threading.Event | None = None) -> str:
     emit({"type": "note", "text": f"Engine: {'LIVE (Claude)' if settings.ai_live else 'SIMULATION'}"})
     try:
         if settings.ai_live:
-            return _run_live(target, mode, autonomy, emit, on_finding)
-        return _run_sim(target, mode, autonomy, emit, on_finding)
+            return _run_live(target, mode, autonomy, emit, on_finding, stop_event)
+        return _run_sim(target, mode, autonomy, emit, on_finding, stop_event)
     except Exception as e:  # noqa: BLE001
         emit({"type": "error", "text": f"engine error: {e}"})
         return f"Assessment failed: {e}"
