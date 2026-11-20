@@ -561,14 +561,38 @@ async function setFindingStatus(id, status) {
 async function viewKnowledge() {
   const c = $("#content");
   c.innerHTML = `<div class="muted">Loading knowledge base…</div>`;
-  const { references } = await api("/api/knowledge");
+  const { references, corpus } = await api("/api/knowledge");
+  const corpusLine = corpus && corpus.indexed
+    ? `<span class="pill confirmed">RAG corpus: ${corpus.chunks.toLocaleString()} chunks</span> <span class="muted">sources: ${(corpus.sources || []).join(", ")}</span>`
+    : `<span class="pill needs_review">RAG corpus not ingested on this host</span>`;
   c.innerHTML = `
-    <div class="hint">These references feed the AI as retrieval context + methodology playbooks (RAG), not model retraining.
-      The agent pulls the most relevant ones into each assessment.</div>
-    <div class="ref-grid" style="margin-top:14px">
+    <div class="hint">References feed the AI as retrieval context (RAG) + methodology playbooks — not model retraining.
+      During an assessment the AI searches this corpus for real payloads/techniques and uses them.</div>
+    <div class="card" style="margin-top:12px">
+      <div class="row spread"><div>${corpusLine}</div></div>
+      <div class="row" style="margin-top:10px">
+        <input id="kbq" placeholder="Search corpus payloads/techniques… e.g. SQL injection WAF bypass" style="flex:1" />
+        <button class="btn sm" id="kbsearch">Search</button>
+      </div>
+      <div id="kbresults" style="margin-top:12px"></div>
+    </div>
+    <div class="section-title"><h3>Reference registry (${references.length})</h3></div>
+    <div class="ref-grid">
       ${references.map((r) => `<div class="ref"><div class="cat">${esc(r.category)}</div><b>${esc(r.name)}</b>
         <p>${esc(r.note)}</p><div class="tagline">${(r.tags || []).map((t) => `<span class="tag">${esc(t)}</span>`).join("")}</div></div>`).join("")}
     </div>`;
+  const doSearch = async () => {
+    const q = $("#kbq").value.trim(); if (!q) return;
+    $("#kbresults").innerHTML = `<div class="muted">Searching…</div>`;
+    try {
+      const { hits } = await api("/api/knowledge/search?q=" + encodeURIComponent(q));
+      $("#kbresults").innerHTML = hits.length
+        ? hits.map((h) => `<div class="card" style="margin:8px 0"><div class="row spread"><b>${esc(h.heading)}</b><span class="tag">${esc(h.path)}</span></div><div class="codeblock" style="margin-top:8px">${esc(h.text.slice(0, 700))}</div></div>`).join("")
+        : `<div class="muted">No matches.</div>`;
+    } catch (e) { $("#kbresults").innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+  };
+  $("#kbsearch").addEventListener("click", doSearch);
+  $("#kbq").addEventListener("keydown", (e) => { if (e.key === "Enter") doSearch(); });
 }
 
 /* ----------------------------- Audit ----------------------------- */

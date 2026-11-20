@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 
 from ..config import get_settings
-from ..engine import knowledge, tools
+from ..engine import kb_index, knowledge, tools
 from ..models import User
 from ..security import get_current_user
 
@@ -24,4 +24,9 @@ def status(user: User = Depends(get_current_user)) -> dict:
 
 @router.get("/knowledge")
 def knowledge_catalog(user: User = Depends(get_current_user)) -> dict:
-    return {"references": knowledge.catalog()}
+    return {"references": knowledge.catalog(), "corpus": kb_index.stats()}
+
+
+@router.get("/knowledge/search")
+def knowledge_search(q: str, user: User = Depends(get_current_user)) -> dict:
+    return {"query": q, "hits": kb_index.search(q, k=6)}

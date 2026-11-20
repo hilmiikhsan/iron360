@@ -239,17 +239,36 @@ def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
 
 
 def _ai_extract_findings(target: Target, collected: list[tuple[str, str, str]], emit: Emit) -> list[dict]:
-    """Single Claude call: analyze real tool output → structured findings."""
-    from . import llm
+    """Single Claude call: analyze real tool output → structured findings, with RAG payloads."""
+    from . import kb_index, llm
 
     blob = []
+    present = {name for name, _, _ in collected}
     for tool_name, command, output in collected:
         blob.append(f"### {tool_name}\n$ {command}\n{output[:6000]}")
     kb = knowledge.methodology_brief(f"web vulnerability {target.value} owasp sqli xss headers tls")
+
+    # RAG: pull real payloads/techniques from the corpus for whatever surfaced.
+    rag_queries = []
+    if "sqli-candidates" in present or "sqlmap" in present:
+        rag_queries.append("SQL injection payload bypass WAF union based blind")
+    if "xss-candidates" in present or "dalfox" in present:
+        rag_queries.append("XSS payload filter bypass reflected DOM")
+    if "lfi-candidates" in present:
+        rag_queries.append("local file inclusion path traversal payload")
+    if "ssrf-candidates" in present:
+        rag_queries.append("SSRF payload bypass internal metadata")
+    if not rag_queries:
+        rag_queries.append("web application security headers misconfiguration")
+    rag = "\n\n".join(kb_index.brief(q, k=3) for q in rag_queries[:3])
+    if rag.strip():
+        emit({"type": "reasoning", "text": "Retrieved payloads/techniques from corpus (PayloadsAllTheThings/writeups) for analysis."})
+
     user = (f"Target: {target.label} ({target.value}), engagement: {target.engagement or 'internal'}.\n"
             f"Authorized scope: {', '.join([target.value] + (target.scope_extra or []))}.\n\n"
-            f"Scanner output to analyze:\n\n" + "\n\n".join(blob) + f"\n\n{kb}\n\n"
-            "Extract the findings as the JSON array specified. If the output shows no issues, return [].")
+            f"Scanner output to analyze:\n\n" + "\n\n".join(blob) + f"\n\n{kb}\n\n{rag}\n\n"
+            "Extract the findings as the JSON array specified. Use the retrieved payloads/techniques to judge "
+            "exploitability and to write accurate evidence/remediation. If the output shows no issues, return [].")
     try:
         client = llm.make_client()
         resp = client.messages.create(
