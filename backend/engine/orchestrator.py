@@ -200,6 +200,17 @@ def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
     if uniq_subs:
         emit({"type": "reasoning", "text": f"Subdomains discovered: {len(uniq_subs)} unique."})
 
+    # Exploit-DB correlation on detected services (local CSV lookup, no target contact)
+    nmap_out = next((out for (tn, _, out) in collected if tn == "nmap"), "")
+    if nmap_out:
+        from . import exploitdb
+        exploits = exploitdb.correlate(nmap_out)
+        if exploits:
+            emit({"type": "reasoning", "text": f"Exploit-DB: {len(exploits)} candidate public exploit(s) matched to detected service versions."})
+            collected.append(("exploit-db", "exploit-db correlation",
+                              "\n".join(f"[{e['date']}] {e['description']} ({e['type']}/{e['platform']}) — {e['url']}"
+                                        for e in exploits)))
+
     # Targeted intrusive validation on the best gf candidates (pentest mode only)
     if mode == "pentest" and not _stopped(stop_event):
         for tname, cand in (("sqlmap", cats["sqli"]), ("dalfox", cats["xss"])):
