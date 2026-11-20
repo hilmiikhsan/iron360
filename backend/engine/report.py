@@ -99,6 +99,27 @@ def _intel_html(intel: dict | None) -> str:
         html_parts.append(
             '<h2 class="sec">Intelijen CVE (NVD)</h2><table class="info"><tr><th>CVE</th><th>CVSS</th>'
             f'<th>Severity</th><th>Ringkasan</th></tr>{rows}</table>')
+    owasp = intel.get("owasp") or []
+    if owasp:
+        rows = "".join(
+            f"<tr><td><b>{_esc(m.get('id',''))}</b></td><td>{_esc(m.get('name',''))}</td>"
+            f"<td>{_esc(m.get('method',''))}</td>"
+            f"<td style='text-align:center'>{'<b style=\"color:#dc2626\">'+str(m.get('findings'))+'</b>' if m.get('findings') else '—'}</td></tr>"
+            for m in owasp)
+        html_parts.append(
+            '<h2 class="sec">Cakupan OWASP Top 10 (2021)</h2><p class="muted">Metode pengujian yang dijalankan '
+            f'Iron360 untuk tiap kategori + jumlah temuan.</p><table class="info"><tr><th>ID</th><th>Kategori</th>'
+            f'<th>Metode uji</th><th>Temuan</th></tr>{rows}</table>')
+    comp = intel.get("compliance") or []
+    if comp:
+        rows = "".join(
+            f"<tr><td>{_esc(c.get('control',''))}</td><td>{_esc(c.get('title',''))}</td>"
+            f"<td style='color:{'#047857' if c.get('result')=='pass' else '#dc2626'};font-weight:700'>"
+            f"{_esc((c.get('result') or '').upper())}</td></tr>" for c in comp)
+        passed = sum(1 for c in comp if c.get("result") == "pass")
+        html_parts.append(
+            f'<h2 class="sec">Kepatuhan CIS Benchmark</h2><p class="muted">{passed}/{len(comp)} kontrol lulus '
+            f'(credentialed).</p><table class="info"><tr><th>Kontrol</th><th>Deskripsi</th><th>Hasil</th></tr>{rows}</table>')
     exps = intel.get("exploit-db") or []
     if exps:
         rows = "".join(

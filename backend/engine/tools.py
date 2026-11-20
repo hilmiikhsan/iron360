@@ -99,9 +99,54 @@ _register(Tool(
 ))
 
 _register(Tool(
+    name="wafw00f", binary="wafw00f", category="recon", intensity="active",
+    description="Detect which WAF/firewall protects the target (informs evasion/expectations).",
+    build=lambda host, o: ["wafw00f", "-a", _url(host, o)],
+    needs_scheme=True,
+))
+
+_register(Tool(
     name="gau", binary="gau", category="recon", intensity="passive",
     description="Gather known URLs for a domain from Wayback/OTX/CommonCrawl (passive).",
     build=lambda host, o: ["gau", "--threads", "5", "--timeout", "25", host],
+))
+
+_register(Tool(
+    name="waybackurls", binary="waybackurls", category="recon", intensity="passive",
+    description="Fetch a domain's archived URLs from the Wayback Machine (passive).",
+    build=lambda host, o: ["waybackurls", host],
+))
+
+_register(Tool(
+    name="hakrawler", binary="hakrawler", category="recon", intensity="active",
+    description="Fast endpoint/URL crawler — host supplied on stdin.",
+    build=lambda host, o: ["hakrawler", "-u", "-d", "2", "-t", "10"],
+    stdin=lambda host, o: _url(host, o) + "\n",
+    needs_scheme=True,
+))
+
+_register(Tool(
+    name="paramspider", binary="paramspider", category="recon", intensity="passive",
+    description="Mine URL parameters for a domain from archives (parameter discovery).",
+    build=lambda host, o: ["paramspider", "-d", host, "--subs", "false"],
+))
+
+_register(Tool(
+    name="amass", binary="amass", category="recon", intensity="passive",
+    description="Subdomain enumeration / asset mapping (passive mode only).",
+    build=lambda host, o: ["amass", "enum", "-passive", "-d", host, "-timeout", "5"],
+))
+
+_register(Tool(
+    name="assetfinder", binary="assetfinder", category="recon", intensity="passive",
+    description="Discover subdomains for a domain (passive).",
+    build=lambda host, o: ["assetfinder", "--subs-only", host],
+))
+
+_register(Tool(
+    name="dig", binary="dig", category="recon", intensity="passive",
+    description="DNS lookup + attempt AXFR zone transfer against the domain's NS.",
+    build=lambda host, o: ["dig", "+nocmd", "+noall", "+answer", "ANY", host],
 ))
 
 _register(Tool(
@@ -157,6 +202,29 @@ _register(Tool(
     needs_scheme=True,
 ))
 
+_register(Tool(
+    name="wpscan", binary="wpscan", category="va", intensity="active",
+    description="WordPress scanner — core/plugin/theme versions + known vulns.",
+    build=lambda host, o: ["wpscan", "--url", _url(host, o), "--no-banner", "--random-user-agent",
+                           "--format", "cli-no-color", "--enumerate", "vp,vt"],
+    needs_scheme=True,
+))
+
+_register(Tool(
+    name="droopescan", binary="droopescan", category="va", intensity="active",
+    description="CMS scanner for Drupal/SilverStripe/Joomla/WordPress (version + known issues).",
+    build=lambda host, o: ["droopescan", "scan", _clean(o.get("cms", "drupal")), "-u", _url(host, o)],
+    needs_scheme=True,
+))
+
+_register(Tool(
+    name="dirsearch", binary="dirsearch", category="va", intensity="active",
+    description="Directory/file brute-force with smart extensions + status filtering.",
+    build=lambda host, o: ["dirsearch", "-u", _url(host, o), "-q", "--format=plain",
+                           "-e", "php,asp,aspx,jsp,html,js,txt,bak,zip,sql,conf,env,json"],
+    needs_scheme=True,
+))
+
 # ---------------------------------------------------------------- exploit / deep (intrusive)
 _register(Tool(
     name="ffuf", binary="ffuf", category="exploit", intensity="intrusive",
@@ -207,6 +275,23 @@ _register(Tool(
     description="Recursive content/endpoint discovery. Option: wordlist (absolute path).",
     build=lambda host, o: ["feroxbuster", "-u", _url(host, o), "--silent", "-d", "2", "-t", "30",
                            "-w", _content_wordlist(o)],
+    needs_scheme=True,
+))
+
+
+_register(Tool(
+    name="commix", binary="commix", category="exploit", intensity="intrusive",
+    description="OS command-injection detection/validation on a URL with a parameter. "
+                "Option: param_url (full URL with parameter). Non-interactive (--batch); detection payloads only.",
+    build=lambda host, o: ["commix", "--url=" + _require_param_url(host, o), "--batch",
+                           "--skip-waf", "--technique=cet"],
+    needs_scheme=True,
+))
+
+_register(Tool(
+    name="xsstrike", binary="xsstrike", category="exploit", intensity="intrusive",
+    description="Advanced XSS detection/fuzzing (WAF-aware) on a URL with a parameter. Option: param_url.",
+    build=lambda host, o: ["xsstrike", "-u", _require_param_url(host, o), "--skip-dom"],
     needs_scheme=True,
 ))
 

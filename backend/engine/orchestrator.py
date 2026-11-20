@@ -74,6 +74,11 @@ _GF_PARAMS = {
              "u", "go", "domain", "feed", "host", "site", "html", "callback", "return", "port", "proxy", "next"},
     "redirect": {"url", "redirect", "next", "return", "r", "u", "link", "goto", "dest", "destination",
                  "go", "out", "target", "rurl", "continue", "returnurl"},
+    "rce": {"cmd", "exec", "command", "execute", "ping", "query", "jump", "code", "reg", "do", "func",
+            "arg", "option", "load", "process", "step", "read", "feature", "exe", "module", "payload",
+            "run", "print", "daemon", "upload", "dir", "download", "log", "ip", "host", "port"},
+    "ssti": {"name", "preview", "id", "activity", "template", "page", "dialog", "view", "content",
+             "message", "msg", "redirect", "query", "search", "q", "title", "body", "text", "user"},
 }
 _SENSITIVE_EXT = (".env", ".sql", ".bak", ".old", ".backup", ".config", ".conf", ".ini", ".yml", ".yaml",
                   ".git", ".zip", ".tar.gz", ".tgz", ".db", ".log", ".json", ".xml", ".properties", ".pem", ".key")
@@ -278,7 +283,7 @@ def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
               f"Params: {len(cats['params'])} · SQLi-cand: {len(cats['sqli'])} · XSS-cand: {len(cats['xss'])} · "
               f"LFI-cand: {len(cats['lfi'])} · sensitive files: {len(cats['sensitive_files'])} · JS: {len(cats['js'])}"})
         collected.append(("merged-urls", "merge+dedupe", "\n".join(uniq_urls[:300])))
-        for cat in ("sqli", "xss", "lfi", "ssrf", "redirect", "sensitive_files", "js"):
+        for cat in ("sqli", "xss", "lfi", "ssrf", "redirect", "rce", "ssti", "sensitive_files", "js"):
             if cats.get(cat):
                 collected.append((f"{cat}-candidates", "gf-pattern/python", "\n".join(cats[cat][:60])))
     if uniq_subs:
@@ -324,7 +329,7 @@ def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
 
     # Targeted intrusive validation on the best gf candidates (pentest mode only)
     if mode == "pentest" and not _stopped(stop_event):
-        for tname, cand in (("sqlmap", cats["sqli"]), ("dalfox", cats["xss"])):
+        for tname, cand in (("sqlmap", cats["sqli"]), ("dalfox", cats["xss"]), ("commix", cats.get("rce", []))):
             tool = tools.REGISTRY.get(tname)
             if not tool or not tool.installed or not cand:
                 continue
@@ -369,6 +374,12 @@ def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
             challengeable = _verify_findings(target, challengeable, emit)
         all_findings = det + challengeable
 
+    # OWASP Top 10 (2021) coverage matrix — what was checked + findings per category.
+    matrix = _owasp_matrix(all_findings, mode, profile, has_auth)
+    emit({"type": "intel", "kind": "owasp", "items": matrix})
+    tested = sum(1 for m in matrix if m["method"] != "manual only")
+    emit({"type": "reasoning", "text": f"OWASP Top 10 coverage: {tested}/10 categories actively checked this run."})
+
     for f in all_findings:
         on_finding(f)
         emit({"type": "finding", "finding": f})
@@ -377,6 +388,35 @@ def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
                f"{len(uniq_urls)} unique URLs, {len(all_findings)} finding(s) analyzed + verified by Claude.")
     emit({"type": "finish", "text": summary})
     return summary
+
+
+_OWASP_2021 = [
+    ("A01", "Broken Access Control", "LFI/path-traversal probe, open-redirect probe, nuclei exposure templates"),
+    ("A02", "Cryptographic Failures", "sslscan TLS/cipher audit, HSTS header check"),
+    ("A03", "Injection", "active probes: SQLi/XSS/OS-cmd(commix)/SSTI/CRLF + sqlmap/dalfox + nuclei"),
+    ("A04", "Insecure Design", "flagged for manual review (business-logic)"),
+    ("A05", "Security Misconfiguration", "security-header + CORS probe, nikto, exposed-file detection, nuclei misconfig"),
+    ("A06", "Vulnerable & Outdated Components", "nmap -sV, nuclei CVE templates, CVE/NVD enrichment, Exploit-DB correlation, wpscan"),
+    ("A07", "Identification & Auth Failures", "nuclei default-login/exposure; deeper auth testing manual"),
+    ("A08", "Software & Data Integrity Failures", "nuclei deserialization/exposure templates"),
+    ("A09", "Security Logging & Monitoring Failures", "manual only (not remotely testable)"),
+    ("A10", "Server-Side Request Forgery (SSRF)", "SSRF candidate tagging + nuclei SSRF templates"),
+]
+
+
+def _owasp_matrix(findings: list[dict], mode: str, profile: str, has_auth: bool) -> list[dict]:
+    """Report, per OWASP Top-10 2021 category, the method used + number of findings landed."""
+    active = mode == "pentest"
+    out = []
+    for oid, name, method in _OWASP_2021:
+        m = method
+        if oid in ("A04", "A09"):
+            m = "manual only"
+        elif oid in ("A01", "A03", "A05", "A10") and not active:
+            m = method + " (scan-only in VA mode)"
+        found = sum(1 for f in findings if oid in (f.get("owasp", "") + " " + f.get("description", "")))
+        out.append({"id": oid, "name": name, "method": m, "findings": found})
+    return out
 
 
 def _ai_extract_findings(target: Target, collected: list[tuple[str, str, str]], emit: Emit) -> list[dict]:

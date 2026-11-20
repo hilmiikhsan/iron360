@@ -540,6 +540,10 @@ function handleEvent(e) {
         addTimeline("reasoning", `CVE intel: ${items.map((i) => i.cve).join(", ")}`);
       } else if (e.kind === "exploit-db") {
         addTimeline("reasoning", `Exploit-DB: ${items.length} public exploit(s) matched`);
+      } else if (e.kind === "owasp") {
+        const checked = items.filter((m) => m.method !== "manual only").length;
+        const hits = items.filter((m) => m.findings > 0).map((m) => m.id).join(", ");
+        addTimeline("reasoning", `OWASP Top 10: ${checked}/10 categories checked${hits ? " · findings in " + hits : ""}`);
       }
       break;
     }
