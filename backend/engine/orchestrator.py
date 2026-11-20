@@ -49,76 +49,125 @@ Rules:
 
 
 # ------------------------------------------------------------------ pipeline
-def _pipeline(target: Target, mode: str) -> list[tuple[str, str, dict, str]]:
-    """Ordered (tool, host, options, human description) steps."""
+def _phases(target: Target, mode: str) -> list[tuple[str, list[tuple[str, str, dict, str]]]]:
+    """Phased pipeline. Tools chosen per the ebook methodology; many sources per phase,
+    results merged + deduped. (tool, host, options, description)."""
     host = target.value
-    steps: list[tuple[str, str, dict, str]] = []
-    if target.kind == "domain":
-        steps.append(("subfinder", host, {}, "Enumerate subdomains (passive)"))
-        steps.append(("dnsx", host, {}, "Resolve DNS records"))
-    steps.append(("httpx", host, {}, "Probe live HTTP service + fingerprint tech stack"))
-    steps.append(("nmap", host, {"sv": True}, "Scan top ports + detect service versions"))
-    steps.append(("nuclei", host, {"severity": "critical,high,medium,low"}, "Template-based vulnerability scan"))
-    return steps
+    is_domain = target.kind == "domain"
+    recon = []
+    if is_domain:
+        recon.append(("subfinder", host, {}, "Enumerate subdomains (passive)"))
+        recon.append(("gau", host, {}, "Gather known URLs — Wayback/OTX (passive)"))
+    recon.append(("dnsx", host, {}, "Resolve DNS records"))
+    phases: list[tuple[str, list]] = [
+        ("Recon", recon),
+        ("Fingerprint", [
+            ("httpx", host, {}, "Probe live HTTP + tech stack"),
+            ("whatweb", host, {}, "Fingerprint web technologies"),
+        ]),
+        ("Port scan", [("nmap", host, {"sv": True}, "Top ports + service versions")]),
+        ("Crawl", [("katana", host, {}, "Crawl endpoints (active)")]),
+        ("Vulnerability scan", [
+            ("nuclei", host, {"severity": "critical,high,medium,low"}, "Template-based vuln scan"),
+            ("nikto", host, {}, "Web server vuln scan"),
+            ("sslscan", host, {}, "TLS/SSL protocol + cipher audit"),
+        ]),
+    ]
+    return phases
 
 
 def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
               on_finding: Callable[[dict], None], stop_event: threading.Event | None = None) -> str:
     host = target.value
-    steps = _pipeline(target, mode)
+    phases = _phases(target, mode)
+    flat = [(t, h, o, d) for _, steps in phases for (t, h, o, d) in steps]
 
-    emit({"type": "plan", "steps": [{"n": i + 1, "tool": t, "desc": d} for i, (t, _, _, d) in enumerate(steps)]})
-    emit({"type": "reasoning", "text": f"Authorized {mode.upper()} assessment on {host}. "
-          f"Running {len(steps)} recon/scan steps under scope enforcement; I will analyze the real output."})
+    emit({"type": "plan", "steps": [{"n": i + 1, "tool": t, "desc": d} for i, (t, _, _, d) in enumerate(flat)]})
+    emit({"type": "reasoning", "text": f"Authorized {mode.upper()} on {host}. {len(phases)} phases, "
+          f"{len(flat)} tools, scope-enforced. Multi-source results are merged and deduped; then Claude analyzes."})
 
     collected: list[tuple[str, str, str]] = []
-    for i, (tool_name, h, opts, desc) in enumerate(steps, 1):
+    url_lines: list[str] = []
+    sub_lines: list[str] = []
+    n = 0
+    for phase_name, steps in phases:
         if _stopped(stop_event):
-            emit({"type": "note", "text": "Stopped by operator."})
             emit({"type": "finish", "text": "Assessment stopped by operator."})
             return "Stopped by operator."
-        tool = tools.REGISTRY.get(tool_name)
-        if not tool or not tool.installed:
-            emit({"type": "step", "n": i, "tool": tool_name, "status": "skipped",
-                  "text": f"{desc} — {tool_name} not installed on executor, skipped"})
-            continue
-        emit({"type": "step", "n": i, "tool": tool_name, "status": "running", "text": desc})
-        res = executor.run(target, tool_name, h, opts, stop_event)
-        emit({
-            "type": "exec", "tool": tool_name, "host": h, "command": res.command,
-            "ok": res.ok, "exit_code": res.exit_code, "denied_reason": res.denied_reason,
-            "output": (res.stdout or res.stderr or res.denied_reason or "")[:6000],
-            "duration_s": round(res.duration_s, 1),
-        })
-        if res.ok:
-            emit({"type": "step", "n": i, "tool": tool_name, "status": "done",
-                  "text": f"{desc} — done ({res.duration_s:.1f}s)"})
-            collected.append((tool_name, res.command, res.stdout or "(no output)"))
-        else:
-            emit({"type": "step", "n": i, "tool": tool_name, "status": "failed",
-                  "text": res.denied_reason or "failed"})
+        emit({"type": "reasoning", "text": f"── Phase: {phase_name}"})
+        for tool_name, h, opts, desc in steps:
+            n += 1
+            if _stopped(stop_event):
+                emit({"type": "finish", "text": "Assessment stopped by operator."})
+                return "Stopped by operator."
+            tool = tools.REGISTRY.get(tool_name)
+            if not tool or not tool.installed:
+                emit({"type": "step", "n": n, "tool": tool_name, "status": "skipped", "text": f"{tool_name} not installed"})
+                continue
+            emit({"type": "step", "n": n, "tool": tool_name, "status": "running", "text": desc})
+            res = executor.run(target, tool_name, h, opts, stop_event)
+            emit({"type": "exec", "tool": tool_name, "host": h, "command": res.command,
+                  "ok": res.ok, "exit_code": res.exit_code, "denied_reason": res.denied_reason,
+                  "output": (res.stdout or res.stderr or res.denied_reason or "")[:6000],
+                  "duration_s": round(res.duration_s, 1)})
+            if res.ok:
+                emit({"type": "step", "n": n, "tool": tool_name, "status": "done", "text": f"{desc} — {res.duration_s:.1f}s"})
+                collected.append((tool_name, res.command, res.stdout or "(no output)"))
+                lines = [l.strip() for l in (res.stdout or "").splitlines() if l.strip()]
+                if tool_name in ("gau", "katana"):
+                    url_lines += lines
+                elif tool_name == "subfinder":
+                    sub_lines += lines
+            else:
+                emit({"type": "step", "n": n, "tool": tool_name, "status": "failed", "text": res.denied_reason or "failed"})
+
+    # Merge + dedupe (the "combine results, remove duplicates" step)
+    uniq_urls = sorted({u for u in url_lines if u.startswith("http")})
+    uniq_subs = sorted(set(sub_lines))
+    if url_lines:
+        emit({"type": "reasoning", "text": f"Merged URLs (gau+katana): {len(url_lines)} raw → {len(uniq_urls)} unique after dedupe."})
+        collected.append(("merged-urls", "merge + dedupe", "\n".join(uniq_urls[:400])))
+    if sub_lines:
+        emit({"type": "reasoning", "text": f"Subdomains discovered: {len(uniq_subs)} unique."})
+
+    # Intrusive validation (pentest mode) on a discovered parameterized URL
+    if mode == "pentest" and not _stopped(stop_event):
+        param_url = next((u for u in uniq_urls if "?" in u and "=" in u and host in u), "")
+        if param_url:
+            for tname in ("sqlmap", "dalfox"):
+                tool = tools.REGISTRY.get(tname)
+                if not tool or not tool.installed:
+                    continue
+                if autonomy != "auto":
+                    emit({"type": "approval_required", "tool": tname,
+                          "text": f"Intrusive {tname} on {param_url} held for operator approval."})
+                    continue
+                n += 1
+                emit({"type": "reasoning", "text": f"Validating with {tname} on discovered parameter: {param_url}"})
+                res = executor.run(target, tname, host, {"param_url": param_url}, stop_event)
+                emit({"type": "exec", "tool": tname, "host": param_url, "command": res.command,
+                      "ok": res.ok, "exit_code": res.exit_code, "denied_reason": res.denied_reason,
+                      "output": (res.stdout or res.stderr or res.denied_reason or "")[:6000],
+                      "duration_s": round(res.duration_s, 1)})
+                if res.ok:
+                    collected.append((tname, res.command, res.stdout or ""))
 
     if _stopped(stop_event):
         emit({"type": "finish", "text": "Assessment stopped by operator."})
         return "Stopped by operator."
-
     if not collected:
-        emit({"type": "note", "text": "No executor tools available on this host. "
-              "Install nmap / nuclei / httpx / subfinder / dnsx to run a live scan."})
-        emit({"type": "finish", "text": "No tools executed — nothing to analyze. Install the scanners and retry."})
-        return "No executor tools installed on the server."
+        emit({"type": "note", "text": "No executor tools available / nothing collected."})
+        emit({"type": "finish", "text": "No output to analyze."})
+        return "No output collected."
 
-    emit({"type": "step", "n": len(steps) + 1, "tool": "ai-analysis", "status": "running",
-          "text": "Analyzing collected output with Claude + extracting validated findings"})
+    emit({"type": "reasoning", "text": "Analyzing all collected output with Claude + extracting validated findings…"})
     findings = _ai_extract_findings(target, collected, emit)
     for f in findings:
         on_finding(f)
         emit({"type": "finding", "finding": f})
-    emit({"type": "step", "n": len(steps) + 1, "tool": "ai-analysis", "status": "done",
-          "text": f"Analysis complete — {len(findings)} finding(s)"})
 
-    summary = (f"Live {mode.upper()} complete on {host}: {len(collected)} tool(s) executed, "
-               f"{len(findings)} finding(s) extracted and analyzed by Claude.")
+    summary = (f"Live {mode.upper()} complete on {host}: {len(collected)} data source(s), "
+               f"{len(uniq_urls)} unique URLs, {len(findings)} finding(s) analyzed by Claude.")
     emit({"type": "finish", "text": summary})
     return summary
 

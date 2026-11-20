@@ -78,7 +78,33 @@ _register(Tool(
     name="httpx", binary="httpx", category="recon", intensity="active",
     description="Probe a host for live HTTP services; returns status, title, tech, server.",
     build=lambda host, o: ["httpx", "-silent", "-status-code", "-title", "-tech-detect",
-                            "-web-server", "-u", host],
+                            "-web-server", "-follow-redirects", "-u", host],
+))
+
+_register(Tool(
+    name="whatweb", binary="whatweb", category="recon", intensity="active",
+    description="Fingerprint web technologies (CMS, server, frameworks, versions).",
+    build=lambda host, o: ["whatweb", "--no-errors", "-a", "3", _url(host, o)],
+    needs_scheme=True,
+))
+
+_register(Tool(
+    name="gau", binary="gau", category="recon", intensity="passive",
+    description="Gather known URLs for a domain from Wayback/OTX/CommonCrawl (passive).",
+    build=lambda host, o: ["gau", "--threads", "5", "--timeout", "25", host],
+))
+
+_register(Tool(
+    name="katana", binary="katana", category="recon", intensity="active",
+    description="Crawl a site for endpoints/URLs (depth 2, JS-aware).",
+    build=lambda host, o: ["katana", "-u", _url(host, o), "-silent", "-d", "2", "-jc", "-timeout", "15"],
+    needs_scheme=True,
+))
+
+_register(Tool(
+    name="sslscan", binary="sslscan", category="recon", intensity="active",
+    description="Enumerate SSL/TLS protocols and ciphers (weak protocol detection).",
+    build=lambda host, o: ["sslscan", "--no-colour", host],
 ))
 
 # ---------------------------------------------------------------- VA
@@ -91,6 +117,19 @@ _register(Tool(
         + (["-p", _clean(o["ports"])] if o.get("ports") and o["ports"] != "top1000" else ["--top-ports", "1000"])
         + [host]
     ),
+))
+
+_register(Tool(
+    name="naabu", binary="naabu", category="va", intensity="active",
+    description="Fast port scan (connect mode, no root). Top 1000 ports.",
+    build=lambda host, o: ["naabu", "-host", host, "-silent", "-top-ports", "1000", "-c", "50", "-scan-type", "c"],
+))
+
+_register(Tool(
+    name="nikto", binary="nikto", category="va", intensity="active",
+    description="Web server vulnerability scanner (misconfig, outdated software, dangerous files).",
+    build=lambda host, o: ["nikto", "-host", _url(host, o), "-maxtime", "150s", "-nointeractive", "-ask", "no"],
+    needs_scheme=True,
 ))
 
 _register(Tool(
@@ -126,6 +165,22 @@ _register(Tool(
         "sqlmap", "--batch", "--disable-coloring", "--flush-session",
         "-u", _require_param_url(host, o),
     ],
+    needs_scheme=True,
+))
+
+
+_register(Tool(
+    name="dalfox", binary="dalfox", category="exploit", intensity="intrusive",
+    description="XSS scanner/validator on a URL with a parameter. Option: param_url (full URL with parameter).",
+    build=lambda host, o: ["dalfox", "url", _require_param_url(host, o), "--silence", "--no-color", "--timeout", "20"],
+    needs_scheme=True,
+))
+
+_register(Tool(
+    name="feroxbuster", binary="feroxbuster", category="exploit", intensity="intrusive",
+    description="Recursive content/endpoint discovery. Option: wordlist (absolute path).",
+    build=lambda host, o: ["feroxbuster", "-u", _url(host, o), "--silent", "-d", "2", "-t", "30",
+                           "-w", _clean(o["wordlist"]) if o.get("wordlist") else "/usr/share/seclists/Discovery/Web-Content/common.txt"],
     needs_scheme=True,
 ))
 
