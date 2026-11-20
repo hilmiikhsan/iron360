@@ -150,6 +150,7 @@ def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
           f"{len(flat)} tools, scope-enforced. Multi-source results are merged and deduped; then Claude analyzes."})
 
     collected: list[tuple[str, str, str]] = []
+    all_findings: list[dict] = []
     url_lines: list[str] = []
     sub_lines: list[str] = []
     n = 0
@@ -230,11 +231,9 @@ def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
         emit({"type": "step", "n": n + 1, "tool": "payload-probe", "status": "running",
               "text": "Active payload testing on gf candidates"})
         proven = probe.run_probes(target, cats, emit, stop_event)
-        for f in proven:
-            on_finding(f)
-            emit({"type": "finding", "finding": f})
+        all_findings += proven
         emit({"type": "step", "n": n + 1, "tool": "payload-probe", "status": "done",
-              "text": f"Payload testing — {len(proven)} confirmed"})
+              "text": f"Payload testing — {len(proven)} proven"})
         n += 1
     elif mode == "pentest" and autonomy != "auto" and any(cats.get(c) for c in ("xss", "sqli", "lfi")):
         emit({"type": "approval_required", "tool": "payload-probe",
@@ -272,16 +271,22 @@ def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
         return "No output collected."
 
     emit({"type": "reasoning", "text": "Analyzing all collected output with Claude + extracting validated findings…"})
-    findings = _ai_extract_findings(target, collected, emit)
-    if findings and not _stopped(stop_event):
-        emit({"type": "reasoning", "text": "Anti-false-positive pass: adversarially challenging each finding before reporting…"})
-        findings = _verify_findings(target, findings, emit)
-    for f in findings:
+    all_findings += _ai_extract_findings(target, collected, emit)
+
+    # (2) Align severity to CVE CVSS where a CVE is present
+    all_findings = _apply_cve_severity(all_findings, emit)
+
+    # (1) Anti-FP verification pass over ALL findings (probe + AI)
+    if all_findings and not _stopped(stop_event):
+        emit({"type": "reasoning", "text": "Anti-false-positive pass: adversarially challenging every finding before reporting…"})
+        all_findings = _verify_findings(target, all_findings, emit)
+
+    for f in all_findings:
         on_finding(f)
         emit({"type": "finding", "finding": f})
 
     summary = (f"Live {mode.upper()} complete on {host}: {len(collected)} data source(s), "
-               f"{len(uniq_urls)} unique URLs, {len(findings)} finding(s) analyzed by Claude.")
+               f"{len(uniq_urls)} unique URLs, {len(all_findings)} finding(s) analyzed + verified by Claude.")
     emit({"type": "finish", "text": summary})
     return summary
 
@@ -362,6 +367,42 @@ its evidence genuinely supports it.
 - If the evidence does not support the claim at all, set status 'false_positive'.
 - Append a one-sentence verification note to 'description' prefixed with 'VERIFY: '.
 Reply with ONLY a JSON array of the SAME findings (same fields) with adjusted status/confidence/description."""
+
+
+_SEV_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+
+
+def _cvss_band(score: float) -> str:
+    if score >= 9.0:
+        return "critical"
+    if score >= 7.0:
+        return "high"
+    if score >= 4.0:
+        return "medium"
+    return "low"
+
+
+def _apply_cve_severity(findings: list[dict], emit: Emit) -> list[dict]:
+    """If a finding references a CVE, enrich it with NVD CVSS and raise severity to match."""
+    from . import cve
+    bumped = 0
+    for f in findings:
+        cves = cve.extract(f.get("cve", "") + " " + f.get("description", "") + " " + f.get("evidence", ""))
+        if not cves:
+            continue
+        c = cve.nvd_lookup(cves[0])
+        f["cve"] = cves[0]
+        if c.get("cvss"):
+            band = _cvss_band(float(c["cvss"]))
+            if _SEV_RANK.get(band, 0) > _SEV_RANK.get(f.get("severity", "info"), 0):
+                f["severity"] = band
+                bumped += 1
+            note = f" (CVE {cves[0]} · CVSS {c['cvss']} {c.get('severity') or ''})"
+            if note.strip() not in f.get("description", ""):
+                f["description"] = (f.get("description", "") + note).strip()
+    if bumped:
+        emit({"type": "reasoning", "text": f"CVE/CVSS alignment raised severity on {bumped} finding(s)."})
+    return findings
 
 
 def _verify_findings(target: Target, findings: list[dict], emit: Emit) -> list[dict]:

@@ -514,7 +514,7 @@ async function viewFindings() {
   c.innerHTML = `<div class="card"><table><thead><tr><th>Severity</th><th>Finding</th><th>Status</th><th>Confidence</th><th>Sources</th></tr></thead><tbody>
     ${findings.map((f) => `<tr class="clickable" data-f="${f.id}">
       <td><span class="pill ${f.severity}">${f.severity}</span></td>
-      <td><b>${esc(f.title)}</b><br><small class="muted">${esc(f.affected || "")}</small></td>
+      <td><b>${esc(f.title)}</b> ${f.cve ? `<span class="tag" style="color:var(--accent)">${esc(f.cve)}</span>` : ""}<br><small class="muted">${esc(f.affected || "")}</small></td>
       <td><span class="pill ${f.status}">${f.status.replace("_", " ")}</span></td>
       <td>${f.confidence}%</td>
       <td><small class="muted">${(f.sources || []).map(esc).join(", ")}</small></td></tr>`).join("")}
@@ -529,7 +529,10 @@ function openFinding(id) {
     <div class="row spread"><span class="pill ${f.severity}">${f.severity}</span><button class="btn ghost sm" id="closeDrawer">Close</button></div>
     <h2>${esc(f.title)}</h2>
     <div class="row"><span class="pill ${f.status}">${f.status.replace("_", " ")}</span><span class="muted">confidence ${f.confidence}%</span></div>
-    ${f.cve ? kv("CVE", f.cve) : ""}
+    ${f.cve ? `<div class="kv"><div class="k">CVE / Exploit</div><div class="v">
+        <a href="https://nvd.nist.gov/vuln/detail/${esc(f.cve)}" target="_blank" rel="noopener">${esc(f.cve)} (NVD)</a>
+        &nbsp;·&nbsp;<a href="https://www.exploit-db.com/search?cve=${esc(f.cve)}" target="_blank" rel="noopener">Exploit-DB</a>
+      </div></div>` : ""}
     ${kv("Affected", f.affected || "—")}
     ${kv("Description", esc(f.description || "—"))}
     <div class="kv"><div class="k">Evidence / PoC</div><div class="codeblock">${esc(f.evidence || "(none)")}</div></div>
