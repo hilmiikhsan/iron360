@@ -45,6 +45,9 @@ class Settings:
         self.allowed_origins: list[str] = [o.strip() for o in origins.split(",") if o.strip()]
 
         self.anthropic_api_key: str | None = os.getenv("ANTHROPIC_API_KEY") or None
+        # Point this at an OmniRoute / gateway endpoint (Anthropic-compatible /v1/messages)
+        # to route through your own Claude instead of calling api.anthropic.com directly.
+        self.anthropic_base_url: str | None = os.getenv("ANTHROPIC_BASE_URL") or None
         self.ai_model: str = os.getenv("IRON360_AI_MODEL", "claude-opus-4-8")
         self.ai_effort: str = os.getenv("IRON360_AI_EFFORT", "high")
 
@@ -71,8 +74,8 @@ class Settings:
 
     @property
     def ai_live(self) -> bool:
-        """True when a real Anthropic key is configured (live AI vs simulation)."""
-        return bool(self.anthropic_api_key)
+        """True when a real key or a gateway base URL is configured (live AI vs simulation)."""
+        return bool(self.anthropic_api_key or self.anthropic_base_url)
 
 
 @lru_cache

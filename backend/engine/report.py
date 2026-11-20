@@ -28,8 +28,8 @@ def executive_summary(target: Target, findings: list[Finding]) -> str:
     confirmed = sum(1 for f in findings if f.status == "confirmed")
     if settings.ai_live:
         try:
-            import anthropic
-            client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+            from . import llm
+            client = llm.make_client()
             facts = "\n".join(
                 f"- [{f.severity}/{f.status}] {f.title} (conf {f.confidence}%) @ {f.affected}" for f in findings
             ) or "- No findings."

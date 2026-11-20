@@ -112,9 +112,9 @@ def _tool_schemas(mode: str) -> list[dict]:
 # ------------------------------------------------------------------ live runner
 def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
               on_finding: Callable[[dict], None]) -> str:
-    import anthropic
+    from . import llm
 
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    client = llm.make_client()
     kb = knowledge.methodology_brief(f"{mode} web pentest {target.value} owasp recon sqli xss")
     user_intro = (
         f"Engagement: {target.engagement or 'internal'}\n"
