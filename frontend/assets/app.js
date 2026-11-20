@@ -426,6 +426,28 @@ function openScanStream(scanId) {
   ws.onerror = () => toast("Stream error");
 }
 
+const STEP_ICON = { pending: "○", running: "◍", done: "✓", failed: "✗", skipped: "⊘" };
+
+function renderPlan(steps) {
+  const tl = $("#timeline"); if (!tl) return;
+  const wrap = document.createElement("div");
+  wrap.className = "plan";
+  wrap.innerHTML = `<div class="plan-head">Plan · ${steps.length} steps</div>` +
+    steps.map((s) => `<div class="pstep pending" id="pstep-${s.n}">
+        <span class="pico">${STEP_ICON.pending}</span>
+        <span class="ptool">${esc(s.tool)}</span>
+        <span class="pdesc">${esc(s.desc)}</span>
+        <span class="pmeta"></span></div>`).join("");
+  tl.appendChild(wrap); tl.scrollTop = tl.scrollHeight;
+}
+function updateStep(n, status, text) {
+  let el = $("#pstep-" + n);
+  if (!el) return;
+  el.className = "pstep " + status;
+  const ico = el.querySelector(".pico"); if (ico) ico.textContent = STEP_ICON[status] || "○";
+  if (text) { const d = el.querySelector(".pdesc"); if (d) d.textContent = text; }
+}
+
 function addTimeline(cls, text) {
   const tl = $("#timeline"); if (!tl) return;
   const icons = { reasoning: "🧠", note: "·", approval_required: "⏸", finding: "⚑", error: "✗", finish: "✓" };
@@ -445,13 +467,15 @@ function addTerm(cls, text) {
 function handleEvent(e) {
   switch (e.type) {
     case "note": addTimeline("note", e.text); break;
+    case "plan": renderPlan(e.steps || []); break;
+    case "step": updateStep(e.n, e.status, e.text); break;
     case "reasoning": addTimeline("reasoning", e.text); break;
     case "approval_required": addTimeline("approval_required", e.text); break;
     case "exec":
       addTerm("cmd", "$ " + e.command);
       if (!e.ok) addTerm("denied", "✗ " + (e.denied_reason || "failed"));
       else {
-        addTerm("out", e.output || "(no output)");
+        addTerm("out", (e.output || "(no output)").slice(0, 4000));
         addTerm("ok", `✓ exit ${e.exit_code} · ${e.duration_s}s`);
       }
       break;
@@ -460,7 +484,6 @@ function handleEvent(e) {
       break;
     case "finish": addTimeline("finish", e.text); break;
     case "done":
-      addTimeline("finish", "Assessment complete.");
       $("#startBtn") && ($("#startBtn").disabled = false); $("#stopBtn") && ($("#stopBtn").disabled = true);
       toast("Assessment complete");
       break;

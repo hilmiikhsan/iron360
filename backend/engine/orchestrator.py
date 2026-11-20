@@ -1,294 +1,241 @@
-"""Agentic VAPT orchestrator.
+"""VAPT orchestrator — step-by-step, streamed, Claude-Code-style.
 
-The AI is a co-pilot that PLANS and DECIDES; it never runs a shell. Each step it
-may call an allowlisted tool (run through the executor, which enforces scope) or
-record a validated finding. The loop: plan -> act -> observe -> decide, until the
-agent calls `finish` or a step budget is hit.
+Live flow (the reliable, defensible design):
+  1. PLAN     — a clear, ordered list of recon/scan steps is announced up front.
+  2. EXECUTE  — the executor runs each allowlisted tool (scope-enforced), one at a
+                time, streaming the command + output live (real-time agent feel).
+  3. ANALYZE  — Claude analyzes the REAL tool output and extracts validated findings
+                with severity, confidence and concrete config fixes. Analyzing tool
+                output is a defensible task the model performs reliably; the AI never
+                has to "autonomously attack", so it is not a dual-use refusal risk.
 
-Two modes:
-  - LIVE  (ANTHROPIC_API_KEY set): real Claude drives real tools via the executor.
-  - SIM   (no key): a deterministic, realistic script — no tokens, no live tools —
-          so the dashboard is fully demoable offline.
+SIM flow (no API key): a scripted, realistic run so the dashboard is demoable offline.
 
-Events are pushed to `emit(event)` so the API layer can stream them over WebSocket
-and persist the timeline.
+Events pushed to emit(event); the frontend renders plan/step/exec/reasoning/finding live.
 """
 from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Callable
 
 from ..config import get_settings
 from ..models import Target
 from . import executor, knowledge, tools
 
 settings = get_settings()
-
 Emit = Callable[[dict], None]
-MAX_STEPS = 24
 
-SYSTEM_PROMPT = """You are Iron360, an expert VAPT co-pilot for RSA, operating ONLY against
-targets that are authorized and in-scope for a signed engagement (NDA/SOW). You assist a
-human penetration tester; a human always has the final say on every finding.
+ANALYST_SYSTEM = """You are Iron360, a senior VAPT analyst at RSA. You are given the raw output of
+security scanners that were run against an AUTHORIZED, in-scope target during a signed engagement.
+Your job is to ANALYZE that output and produce a clean, honest findings list.
 
-Hard rules:
-- You never have raw shell access. You act ONLY by calling the provided tools.
-- The executor enforces scope. If a target is refused, DO NOT retry it — note it and move on.
-- Work in-scope only. Never attempt to reach a host outside the engagement scope.
-
-Methodology (OWASP WSTG + NIST SP 800-115), anti-false-positive discipline:
-1. Recon first (subdomains, DNS, live HTTP, tech stack), then service/port VA, then targeted checks.
-2. Adapt known techniques (OWASP Top 10, documented bypasses, payload references) to what you observe.
-3. BEFORE recording any finding as 'confirmed', you must have reproducible evidence (a PoC the tool
-   output actually demonstrates). If you only have a scanner hit with no proof, record it as 'likely'
-   or 'needs_review' with an honest confidence score — never inflate.
-4. Prefer multi-tool corroboration. A single low-signal hit is 'needs_review', not 'confirmed'.
-5. Challenge your own results: ask "could this be a false positive?" and say why not before confirming.
-
-Remediation must be CONCRETE, not generic. For every finding, `fix_config` must contain the actual
-config/code the client can copy-paste — tailored to the stack you detected during recon (e.g. the real
-nginx/apache directive, the real parameterized-query snippet in the detected language, the exact security
-header, the precise cipher/protocol line). Never write vague advice like "use prepared statements"; write
-the statement. `fix_steps` lists how to apply it and how to verify the fix worked.
-
-When you have completed the assessment, call `finish` with a short summary.
-Think step by step, but keep each spoken message concise and operator-focused."""
+Rules:
+- Only report what the tool output actually supports. Do NOT invent vulnerabilities.
+- status: 'confirmed' ONLY if the output contains direct evidence/PoC; otherwise 'likely' or 'needs_review'.
+- Give an honest confidence (0-100). Prefer multi-tool corroboration.
+- remediation must be CONCRETE: `fix_config` is the actual copy-pasteable config/code for the DETECTED
+  stack (real nginx/apache directive, real parameterized query, exact header/cipher line), and `fix_steps`
+  says how to apply + verify. Never vague advice.
+- Reply with ONLY a JSON array (no prose, no markdown fences). Each item:
+  {"title","severity":"critical|high|medium|low|info","status":"confirmed|likely|needs_review",
+   "confidence":int,"affected","cve","description","evidence","remediation","fix_config","fix_steps",
+   "sources":[tool names]}."""
 
 
-# ------------------------------------------------------------------ tool schemas
-def _tool_schemas(mode: str) -> list[dict]:
-    """Expose allowlisted tools to the model, gated by mode + install status."""
-    allow_intensity = {"passive", "active"} if mode == "va" else {"passive", "active", "intrusive"}
-    schemas: list[dict] = []
-    for name, tool in tools.REGISTRY.items():
-        if tool.intensity not in allow_intensity or not tool.installed:
-            continue
-        schemas.append({
-            "name": f"tool_{name}",
-            "description": f"[{tool.category}/{tool.intensity}] {tool.description}",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "host": {"type": "string", "description": "In-scope host/domain/IP to target."},
-                    "options": {"type": "object", "description": "Tool-specific options (see description)."},
-                    "rationale": {"type": "string", "description": "Why this step, in one sentence."},
-                },
-                "required": ["host"],
-            },
-        })
-    schemas.append({
-        "name": "record_finding",
-        "description": "Record a vulnerability finding with an honest validation state and confidence.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "title": {"type": "string"},
-                "severity": {"type": "string", "enum": ["critical", "high", "medium", "low", "info"]},
-                "status": {"type": "string", "enum": ["confirmed", "likely", "needs_review", "false_positive"]},
-                "confidence": {"type": "integer", "minimum": 0, "maximum": 100},
-                "affected": {"type": "string", "description": "URL/host/parameter affected."},
-                "cve": {"type": "string"},
-                "description": {"type": "string"},
-                "evidence": {"type": "string", "description": "The PoC / proof from tool output."},
-                "remediation": {"type": "string", "description": "One-line summary of the fix."},
-                "fix_config": {"type": "string", "description": "Concrete, copy-pasteable config/code for the "
-                               "DETECTED stack (actual directive/snippet, not generic advice)."},
-                "fix_steps": {"type": "string", "description": "How to apply the fix and how to verify it worked."},
-                "sources": {"type": "array", "items": {"type": "string"}, "description": "Tools that corroborated it."},
-            },
-            "required": ["title", "severity", "status", "confidence"],
-        },
-    })
-    schemas.append({
-        "name": "finish",
-        "description": "End the assessment with a concise summary.",
-        "input_schema": {"type": "object", "properties": {"summary": {"type": "string"}}, "required": ["summary"]},
-    })
-    return schemas
+# ------------------------------------------------------------------ pipeline
+def _pipeline(target: Target, mode: str) -> list[tuple[str, str, dict, str]]:
+    """Ordered (tool, host, options, human description) steps."""
+    host = target.value
+    steps: list[tuple[str, str, dict, str]] = []
+    if target.kind == "domain":
+        steps.append(("subfinder", host, {}, "Enumerate subdomains (passive)"))
+        steps.append(("dnsx", host, {}, "Resolve DNS records"))
+    steps.append(("httpx", host, {}, "Probe live HTTP service + fingerprint tech stack"))
+    steps.append(("nmap", host, {"sv": True}, "Scan top ports + detect service versions"))
+    steps.append(("nuclei", host, {"severity": "critical,high,medium,low"}, "Template-based vulnerability scan"))
+    return steps
 
 
-# ------------------------------------------------------------------ live runner
 def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
               on_finding: Callable[[dict], None]) -> str:
+    host = target.value
+    steps = _pipeline(target, mode)
+
+    emit({"type": "plan", "steps": [{"n": i + 1, "tool": t, "desc": d} for i, (t, _, _, d) in enumerate(steps)]})
+    emit({"type": "reasoning", "text": f"Authorized {mode.upper()} assessment on {host}. "
+          f"Running {len(steps)} recon/scan steps under scope enforcement; I will analyze the real output."})
+
+    collected: list[tuple[str, str, str]] = []
+    for i, (tool_name, h, opts, desc) in enumerate(steps, 1):
+        tool = tools.REGISTRY.get(tool_name)
+        if not tool or not tool.installed:
+            emit({"type": "step", "n": i, "tool": tool_name, "status": "skipped",
+                  "text": f"{desc} — {tool_name} not installed on executor, skipped"})
+            continue
+        emit({"type": "step", "n": i, "tool": tool_name, "status": "running", "text": desc})
+        res = executor.run(target, tool_name, h, opts)
+        emit({
+            "type": "exec", "tool": tool_name, "host": h, "command": res.command,
+            "ok": res.ok, "exit_code": res.exit_code, "denied_reason": res.denied_reason,
+            "output": (res.stdout or res.stderr or res.denied_reason or "")[:6000],
+            "duration_s": round(res.duration_s, 1),
+        })
+        if res.ok:
+            emit({"type": "step", "n": i, "tool": tool_name, "status": "done",
+                  "text": f"{desc} — done ({res.duration_s:.1f}s)"})
+            collected.append((tool_name, res.command, res.stdout or "(no output)"))
+        else:
+            emit({"type": "step", "n": i, "tool": tool_name, "status": "failed",
+                  "text": res.denied_reason or "failed"})
+
+    if not collected:
+        emit({"type": "note", "text": "No executor tools available on this host. "
+              "Install nmap / nuclei / httpx / subfinder / dnsx to run a live scan."})
+        emit({"type": "finish", "text": "No tools executed — nothing to analyze. Install the scanners and retry."})
+        return "No executor tools installed on the server."
+
+    emit({"type": "step", "n": len(steps) + 1, "tool": "ai-analysis", "status": "running",
+          "text": "Analyzing collected output with Claude + extracting validated findings"})
+    findings = _ai_extract_findings(target, collected, emit)
+    for f in findings:
+        on_finding(f)
+        emit({"type": "finding", "finding": f})
+    emit({"type": "step", "n": len(steps) + 1, "tool": "ai-analysis", "status": "done",
+          "text": f"Analysis complete — {len(findings)} finding(s)"})
+
+    summary = (f"Live {mode.upper()} complete on {host}: {len(collected)} tool(s) executed, "
+               f"{len(findings)} finding(s) extracted and analyzed by Claude.")
+    emit({"type": "finish", "text": summary})
+    return summary
+
+
+def _ai_extract_findings(target: Target, collected: list[tuple[str, str, str]], emit: Emit) -> list[dict]:
+    """Single Claude call: analyze real tool output → structured findings."""
     from . import llm
 
-    client = llm.make_client()
-    kb = knowledge.methodology_brief(f"{mode} web pentest {target.value} owasp recon sqli xss")
-    user_intro = (
-        f"Engagement: {target.engagement or 'internal'}\n"
-        f"Target workspace: {target.label} ({target.value}), kind={target.kind}\n"
-        f"Authorized scope: {', '.join([target.value] + (target.scope_extra or []))}\n"
-        f"Mode: {mode.upper()}  Autonomy: {autonomy}\n\n{kb}\n\nBegin the assessment."
-    )
-    messages: list[dict] = [{"role": "user", "content": user_intro}]
-    schemas = _tool_schemas(mode)
-    summary = ""
-
-    for step in range(MAX_STEPS):
+    blob = []
+    for tool_name, command, output in collected:
+        blob.append(f"### {tool_name}\n$ {command}\n{output[:6000]}")
+    kb = knowledge.methodology_brief(f"web vulnerability {target.value} owasp sqli xss headers tls")
+    user = (f"Target: {target.label} ({target.value}), engagement: {target.engagement or 'internal'}.\n"
+            f"Authorized scope: {', '.join([target.value] + (target.scope_extra or []))}.\n\n"
+            f"Scanner output to analyze:\n\n" + "\n\n".join(blob) + f"\n\n{kb}\n\n"
+            "Extract the findings as the JSON array specified. If the output shows no issues, return [].")
+    try:
+        client = llm.make_client()
         resp = client.messages.create(
-            model=settings.ai_model,
-            max_tokens=4096,
-            system=SYSTEM_PROMPT,
-            tools=schemas,
+            model=settings.ai_model, max_tokens=8000,
+            system=ANALYST_SYSTEM,
             thinking={"type": "adaptive"},
-            output_config={"effort": settings.ai_effort},
-            messages=messages,
+            messages=[{"role": "user", "content": user}],
         )
         if resp.stop_reason == "refusal":
-            emit({"type": "note", "text": "AI safety classifier declined this step; stopping."})
-            break
-
-        assistant_content: list[Any] = []
-        tool_results: list[dict] = []
-        for block in resp.content:
-            if block.type == "text" and block.text.strip():
-                emit({"type": "reasoning", "text": block.text.strip()})
-                assistant_content.append({"type": "text", "text": block.text})
-            elif block.type == "thinking":
-                assistant_content.append(block.model_dump())
-            elif block.type == "tool_use":
-                assistant_content.append(block.model_dump())
-                result = _dispatch_tool(target, mode, autonomy, block, emit, on_finding)
-                if result.get("_finish"):
-                    summary = result["summary"]
-                    messages.append({"role": "assistant", "content": assistant_content})
-                    return summary
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": result["content"],
-                    "is_error": result.get("is_error", False),
-                })
-
-        messages.append({"role": "assistant", "content": assistant_content})
-        if not tool_results:
-            # No tool calls and no finish → model is done talking.
-            summary = summary or (resp.content[0].text if resp.content else "Assessment ended.")
-            break
-        messages.append({"role": "user", "content": tool_results})
-
-    return summary or "Assessment completed (step budget reached)."
-
-
-def _dispatch_tool(target: Target, mode: str, autonomy: str, block, emit: Emit,
-                   on_finding: Callable[[dict], None]) -> dict:
-    name = block.name
-    args = block.input or {}
-
-    if name == "finish":
-        emit({"type": "finish", "text": args.get("summary", "")})
-        return {"_finish": True, "summary": args.get("summary", "")}
-
-    if name == "record_finding":
-        on_finding(args)
-        emit({"type": "finding", "finding": args})
-        return {"content": "Finding recorded."}
-
-    # tool_<name>
-    tool_name = name.removeprefix("tool_")
-    tool = tools.REGISTRY.get(tool_name)
-    host = args.get("host", target.value)
-    options = args.get("options") or {}
-    rationale = args.get("rationale", "")
-    emit({"type": "reasoning", "text": f"→ {tool_name} on {host}" + (f" — {rationale}" if rationale else "")})
-
-    # Approval gate for intrusive actions when not in auto mode.
-    if tool and tool.intensity == "intrusive" and autonomy != "auto":
-        emit({"type": "approval_required", "tool": tool_name, "host": host,
-              "text": f"Intrusive step '{tool_name}' on {host} held for operator approval (autonomy=approve)."})
-        return {"content": f"HELD: '{tool_name}' requires operator approval in approve mode. Continue with non-intrusive steps."}
-
-    res = executor.run(target, tool_name, host, options)
-    emit({
-        "type": "exec",
-        "tool": tool_name, "host": host, "command": res.command,
-        "ok": res.ok, "exit_code": res.exit_code,
-        "denied_reason": res.denied_reason,
-        "output": (res.stdout or res.stderr or res.denied_reason)[:6000],
-        "duration_s": round(res.duration_s, 1),
-    })
-    if not res.ok:
-        return {"content": f"DENIED/FAILED: {res.denied_reason}", "is_error": True}
-    body = res.stdout.strip() or "(no stdout)"
-    return {"content": f"exit={res.exit_code} time={res.duration_s:.1f}s\n{body[:8000]}"}
+            emit({"type": "note", "text": "AI analysis was declined by the safety classifier."})
+            return []
+        text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
+        text = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        start, end = text.find("["), text.rfind("]")
+        if start == -1 or end == -1:
+            emit({"type": "note", "text": "AI returned no structured findings."})
+            return []
+        data = json.loads(text[start:end + 1])
+        out = []
+        for f in data if isinstance(data, list) else []:
+            if not isinstance(f, dict) or not f.get("title"):
+                continue
+            out.append({
+                "title": str(f.get("title"))[:255], "severity": f.get("severity", "info"),
+                "status": f.get("status", "needs_review"), "confidence": int(f.get("confidence", 0) or 0),
+                "affected": str(f.get("affected", ""))[:255], "cve": str(f.get("cve", ""))[:64],
+                "description": str(f.get("description", "")), "evidence": str(f.get("evidence", "")),
+                "remediation": str(f.get("remediation", "")), "fix_config": str(f.get("fix_config", "")),
+                "fix_steps": str(f.get("fix_steps", "")),
+                "sources": f.get("sources", []) if isinstance(f.get("sources"), list) else [],
+            })
+        return out
+    except Exception as e:  # noqa: BLE001
+        emit({"type": "note", "text": f"AI analysis error: {e}"})
+        return []
 
 
 # ------------------------------------------------------------------ simulation
 def _run_sim(target: Target, mode: str, autonomy: str, emit: Emit,
              on_finding: Callable[[dict], None]) -> str:
     host = target.value
+    plan = [
+        ("subfinder", "Enumerate subdomains (passive)"),
+        ("httpx", "Probe live HTTP service + fingerprint stack"),
+        ("nuclei", "Template-based vulnerability scan"),
+        ("sqlmap", "Validate suspected SQL injection"),
+        ("ai-analysis", "Analyze output + extract validated findings"),
+    ]
+    emit({"type": "plan", "steps": [{"n": i + 1, "tool": t, "desc": d} for i, (t, d) in enumerate(plan)]})
 
-    def step(delay: float, event: dict) -> None:
+    def step(delay, ev):
         time.sleep(delay)
-        emit(event)
+        emit(ev)
 
-    step(0.3, {"type": "reasoning", "text": f"Planning {mode.upper()} for in-scope target {host}. Starting with passive recon."})
-    step(0.6, {"type": "exec", "tool": "subfinder", "host": host, "command": f"subfinder -silent -d {host}",
+    step(0.2, {"type": "reasoning", "text": f"Planning {mode.upper()} for in-scope target {host}. Starting passive recon."})
+    step(0.3, {"type": "step", "n": 1, "tool": "subfinder", "status": "running", "text": "Enumerate subdomains"})
+    step(0.5, {"type": "exec", "tool": "subfinder", "host": host, "command": f"subfinder -silent -d {host}",
                "ok": True, "exit_code": 0, "output": f"www.{host}\napi.{host}\ndev.{host}", "duration_s": 2.1})
-    step(0.6, {"type": "reasoning", "text": "Three subdomains resolved. Probing live HTTP services + tech stack."})
-    step(0.6, {"type": "exec", "tool": "httpx", "host": f"www.{host}", "command": f"httpx -silent -title -tech-detect -u www.{host}",
+    step(0.2, {"type": "step", "n": 1, "tool": "subfinder", "status": "done", "text": "3 subdomains found"})
+    step(0.3, {"type": "step", "n": 2, "tool": "httpx", "status": "running", "text": "Probe HTTP + tech"})
+    step(0.5, {"type": "exec", "tool": "httpx", "host": f"www.{host}", "command": f"httpx -silent -title -tech-detect -u www.{host}",
                "ok": True, "exit_code": 0, "output": f"https://www.{host} [200] [Login] [nginx, PHP, jQuery]", "duration_s": 1.4})
+    step(0.2, {"type": "step", "n": 2, "tool": "httpx", "status": "done", "text": "Stack: nginx + PHP"})
+    step(0.3, {"type": "step", "n": 3, "tool": "nuclei", "status": "running", "text": "Vulnerability scan"})
     step(0.6, {"type": "exec", "tool": "nuclei", "host": f"www.{host}", "command": f"nuclei -severity critical,high,medium -u https://www.{host}",
                "ok": True, "exit_code": 0, "output": "[medium] tls-version :: TLS 1.0 enabled\n[info] missing-csp-header", "duration_s": 9.3})
-    step(0.7, {"type": "reasoning", "text": "Scanner flagged a possible SQLi on api. Per anti-FP policy I will NOT report it yet — validating with a reproducing probe."})
-    step(0.8, {"type": "exec", "tool": "sqlmap", "host": f"api.{host}", "command": f"sqlmap --batch -u https://api.{host}/v1/items?id=1",
+    step(0.2, {"type": "step", "n": 3, "tool": "nuclei", "status": "done", "text": "2 signals; validating"})
+    step(0.3, {"type": "reasoning", "text": "Possible SQLi on api. Per anti-FP policy I validate with a reproducing probe before reporting."})
+    step(0.3, {"type": "step", "n": 4, "tool": "sqlmap", "status": "running", "text": "Validate SQLi"})
+    step(0.6, {"type": "exec", "tool": "sqlmap", "host": f"api.{host}", "command": f"sqlmap --batch -u https://api.{host}/v1/items?id=1",
                "ok": True, "exit_code": 0, "output": "Parameter 'id' is vulnerable (boolean-based blind). Payload: id=1 AND 1=1", "duration_s": 14.8})
-    step(0.5, {"type": "reasoning", "text": "Reproduced the injection twice (1=1 vs 1=2 differ). False positive: NO. Confidence high. Recording as CONFIRMED."})
+    step(0.2, {"type": "step", "n": 4, "tool": "sqlmap", "status": "done", "text": "SQLi reproduced (1=1 vs 1=2). False positive: NO."})
+    step(0.3, {"type": "step", "n": 5, "tool": "ai-analysis", "status": "running", "text": "Extracting findings"})
     f1 = {
         "title": "SQL Injection on /v1/items (id parameter)", "severity": "high", "status": "confirmed",
         "confidence": 94, "affected": f"https://api.{host}/v1/items?id=", "cve": "",
-        "description": "Boolean-based blind SQL injection in the 'id' parameter of the items API (detected stack: PHP + MySQL).",
-        "evidence": "sqlmap confirmed: id=1 AND 1=1 → 200/data; id=1 AND 1=2 → 200/empty. Differential proves injection.",
+        "description": "Boolean-based blind SQL injection in the 'id' parameter (detected stack: PHP + MySQL).",
+        "evidence": "sqlmap confirmed: id=1 AND 1=1 -> 200/data; id=1 AND 1=2 -> 200/empty. Differential proves injection.",
         "remediation": "Replace string-concatenated SQL with a parameterized (prepared) statement and type-cast 'id'.",
-        "fix_config": (
-            "// Vulnerable (detected): \n"
-            "// $q = \"SELECT * FROM items WHERE id = \".$_GET['id'];\n\n"
-            "// Fix — PDO prepared statement (PHP/MySQL):\n"
-            "$id = filter_input(INPUT_GET, 'id', FILTER_VALIDATE_INT);\n"
-            "if ($id === false) { http_response_code(400); exit('invalid id'); }\n"
-            "$stmt = $pdo->prepare('SELECT * FROM items WHERE id = :id');\n"
-            "$stmt->execute([':id' => $id]);\n"
-            "$rows = $stmt->fetchAll(PDO::FETCH_ASSOC);"
-        ),
-        "fix_steps": (
-            "1. Patch every query that interpolates request input (grep for \"$_GET\"/\"$_POST\" inside SQL).\n"
-            "2. Add a WAF virtual-patch rule on the 'id' param as interim mitigation (Ironcloud WAF).\n"
-            "3. Re-test: `sqlmap --batch -u https://api." + host + "/v1/items?id=1` must report NOT injectable."
-        ),
+        "fix_config": ("// Fix — PDO prepared statement (PHP/MySQL):\n"
+                       "$id = filter_input(INPUT_GET, 'id', FILTER_VALIDATE_INT);\n"
+                       "if ($id === false) { http_response_code(400); exit('invalid id'); }\n"
+                       "$stmt = $pdo->prepare('SELECT * FROM items WHERE id = :id');\n"
+                       "$stmt->execute([':id' => $id]);"),
+        "fix_steps": ("1. Patch every query interpolating request input.\n"
+                      "2. Add a WAF virtual-patch (Ironcloud) on 'id' as interim mitigation.\n"
+                      f"3. Re-test: sqlmap --batch -u https://api.{host}/v1/items?id=1 must report NOT injectable."),
         "sources": ["nuclei", "sqlmap"],
     }
     step(0.3, {"type": "finding", "finding": f1}); on_finding(f1)
     f2 = {
         "title": "TLS 1.0/1.1 enabled", "severity": "medium", "status": "likely", "confidence": 70,
-        "affected": f"https://www.{host}", "description": "Legacy TLS 1.0/1.1 negotiated on nginx — weak protocol (PCI-DSS fail).",
+        "affected": f"https://www.{host}", "description": "Legacy TLS 1.0/1.1 negotiated on nginx (PCI-DSS fail).",
         "evidence": "nuclei tls-version template matched TLS 1.0.",
-        "remediation": "Disable TLS 1.0/1.1 and enforce TLS 1.2+ with a strong cipher suite.",
-        "fix_config": (
-            "# /etc/nginx/conf.d/ssl.conf  (detected stack: nginx)\n"
-            "ssl_protocols TLSv1.2 TLSv1.3;\n"
-            "ssl_prefer_server_ciphers on;\n"
-            "ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384;\n"
-            "add_header Strict-Transport-Security \"max-age=63072000; includeSubDomains\" always;"
-        ),
-        "fix_steps": (
-            "1. Apply the block, then `nginx -t && nginx -s reload`.\n"
-            "2. Verify: `nmap --script ssl-enum-ciphers -p 443 www." + host + "` should show only TLSv1.2/1.3."
-        ),
+        "remediation": "Disable TLS 1.0/1.1 and enforce TLS 1.2+.",
+        "fix_config": ("# /etc/nginx/conf.d/ssl.conf (nginx)\n"
+                       "ssl_protocols TLSv1.2 TLSv1.3;\n"
+                       "ssl_prefer_server_ciphers on;\n"
+                       "add_header Strict-Transport-Security \"max-age=63072000; includeSubDomains\" always;"),
+        "fix_steps": f"1. Apply, then: nginx -t && nginx -s reload.\n2. Verify: nmap --script ssl-enum-ciphers -p 443 www.{host}.",
         "sources": ["nuclei"],
     }
     step(0.3, {"type": "finding", "finding": f2}); on_finding(f2)
-    summary = ("Assessment complete (SIMULATION). 1 confirmed High (SQLi, validated), 1 likely Medium (TLS 1.0). "
-               "All steps stayed in-scope. Set ANTHROPIC_API_KEY to run the live AI engine against real tools.")
-    step(0.4, {"type": "finish", "text": summary})
+    step(0.2, {"type": "step", "n": 5, "tool": "ai-analysis", "status": "done", "text": "2 findings extracted"})
+    summary = ("Assessment complete (SIMULATION). 1 confirmed High (SQLi, validated), 1 likely Medium (TLS). "
+               "All steps stayed in-scope. Connect live AI + install scanners for real execution.")
+    step(0.2, {"type": "finish", "text": summary})
     return summary
 
 
 # ------------------------------------------------------------------ entry point
 def run_assessment(target: Target, mode: str, autonomy: str, emit: Emit,
                    on_finding: Callable[[dict], None]) -> str:
-    emit({"type": "note", "text": f"Engine: {'LIVE (Claude)' if settings.ai_live else 'SIMULATION (no API key)'}"})
+    emit({"type": "note", "text": f"Engine: {'LIVE (Claude)' if settings.ai_live else 'SIMULATION'}"})
     try:
         if settings.ai_live:
             return _run_live(target, mode, autonomy, emit, on_finding)
