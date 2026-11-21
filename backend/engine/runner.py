@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from collections import defaultdict
 
 from ..database import SessionLocal
@@ -20,6 +21,8 @@ _subscribers: dict[int, set[asyncio.Queue]] = defaultdict(set)
 _history: dict[int, list[dict]] = defaultdict(list)
 # scan_id -> stop signal (set when the operator presses Stop)
 _stop_events: dict[int, threading.Event] = {}
+# scan_id -> {approval_id: {"event": Event, "approved": bool}} for interactive Approve mode
+_approvals: dict[int, dict[str, dict]] = defaultdict(dict)
 _loop: asyncio.AbstractEventLoop | None = None
 
 
@@ -27,6 +30,16 @@ def request_stop(scan_id: int) -> None:
     ev = _stop_events.get(scan_id)
     if ev is not None:
         ev.set()
+
+
+def submit_approval(scan_id: int, approval_id: str, approved: bool) -> bool:
+    """Called from the HTTP endpoint when the operator approves/denies an intrusive step."""
+    slot = _approvals.get(scan_id, {}).get(approval_id)
+    if slot is None:
+        return False
+    slot["approved"] = bool(approved)
+    slot["event"].set()
+    return True
 
 
 def bind_loop(loop: asyncio.AbstractEventLoop) -> None:
@@ -80,6 +93,19 @@ def _run(scan_id: int) -> None:
             timeline.append(event)
             _publish(scan_id, event)
 
+        def ask_approval(approval_id: str, timeout: float = 300.0) -> bool:
+            """Block the scan thread until the operator approves/denies, or timeout/stop (fail-closed)."""
+            ev = threading.Event()
+            _approvals[scan_id][approval_id] = {"event": ev, "approved": False}
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                if ev.wait(timeout=0.5):
+                    break
+                if stop_event.is_set():
+                    break
+            slot = _approvals[scan_id].pop(approval_id, {})
+            return bool(slot.get("approved"))
+
         def on_finding(data: dict) -> None:
             f = Finding(
                 target_id=target.id, scan_id=scan_id,
@@ -101,7 +127,7 @@ def _run(scan_id: int) -> None:
 
         summary = orchestrator.run_assessment(
             target, scan.mode, scan.autonomy, emit, on_finding, stop_event,
-            profile=scan.profile or "full",
+            profile=scan.profile or "full", ask_approval=ask_approval,
         )
 
         scan.summary = summary
@@ -120,4 +146,5 @@ def _run(scan_id: int) -> None:
         _publish(scan_id, {"type": "error", "text": str(e)})
     finally:
         _stop_events.pop(scan_id, None)
+        _approvals.pop(scan_id, None)
         db.close()

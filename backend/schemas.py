@@ -75,6 +75,11 @@ class ScanCreate(BaseModel):
     profile: str = "full"          # quick | full | web | network | compliance
 
 
+class ApprovalDecision(BaseModel):
+    approval_id: str
+    approved: bool
+
+
 class ScanOut(ORMModel):
     id: int
     target_id: int

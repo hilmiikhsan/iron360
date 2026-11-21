@@ -195,8 +195,27 @@ def _phases(target: Target, mode: str, profile: str = "full") -> list[tuple[str,
 
 def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
               on_finding: Callable[[dict], None], stop_event: threading.Event | None = None,
-              profile: str = "full") -> str:
+              profile: str = "full", ask_approval: Callable[[str], bool] | None = None) -> str:
     host = target.value
+
+    _ctr = {"n": 0}
+
+    def _approve(tool: str, text: str) -> bool:
+        """Intrusive-step gate. Auto mode runs it; Approve mode asks the operator and waits."""
+        if autonomy == "auto":
+            return True
+        _ctr["n"] += 1
+        approval_id = f"{tool}-{_ctr['n']}"
+        if ask_approval is None:  # no interactive channel (e.g. sim) — fail closed
+            emit({"type": "approval_required", "tool": tool, "text": text + " (no interactive channel — skipped)"})
+            return False
+        emit({"type": "approval_required", "approval_id": approval_id, "tool": tool,
+              "text": text + " — awaiting operator approval."})
+        ok = ask_approval(approval_id)
+        emit({"type": "approval_resolved", "approval_id": approval_id, "tool": tool, "approved": ok,
+              "text": f"{tool}: {'approved — running' if ok else 'denied/timeout — skipped'}"})
+        return ok
+
     phases = _phases(target, mode, profile)
     flat = [(t, h, o, d) for _, steps in phases for (t, h, o, d) in steps]
     has_auth = target.auth_type in ("ssh_password", "ssh_key") and bool(target.auth_user)
@@ -312,20 +331,19 @@ def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
             collected.append(("cve-intel", "nvd enrichment",
                               "\n".join(f"{c['cve']} CVSS {c['cvss']} ({c['severity']}): {c['summary']}" for c in cves)))
 
-    # Active payload testing — prove candidates (reflected XSS / SQLi / LFI) with evidence
-    if mode == "pentest" and autonomy == "auto" and not _stopped(stop_event) and any(
-            cats.get(c) for c in ("xss", "sqli", "lfi")):
-        from . import probe
-        emit({"type": "step", "n": n + 1, "tool": "payload-probe", "status": "running",
-              "text": "Active payload testing on gf candidates"})
-        proven = probe.run_probes(target, cats, emit, stop_event)
-        all_findings += proven
-        emit({"type": "step", "n": n + 1, "tool": "payload-probe", "status": "done",
-              "text": f"Payload testing — {len(proven)} proven"})
-        n += 1
-    elif mode == "pentest" and autonomy != "auto" and any(cats.get(c) for c in ("xss", "sqli", "lfi")):
-        emit({"type": "approval_required", "tool": "payload-probe",
-              "text": "Active payload testing (XSS/SQLi/LFI probes) held for operator approval."})
+    # Active payload testing — prove candidates (XSS/SQLi/LFI/cmdi/SSTI/redirect + CORS/CRLF/headers)
+    _probe_cats = ("xss", "sqli", "lfi", "rce", "ssti", "redirect")
+    if mode == "pentest" and not _stopped(stop_event) and (
+            any(cats.get(c) for c in _probe_cats) or True):  # target-level probes always apply in pentest
+        if _approve("payload-probe", "Active payload testing (XSS/SQLi/OS-cmd/SSTI/redirect + CORS/CRLF/headers) on in-scope candidates"):
+            from . import probe
+            n += 1
+            emit({"type": "step", "n": n, "tool": "payload-probe", "status": "running",
+                  "text": "Active payload testing on gf candidates + target-level checks"})
+            proven = probe.run_probes(target, cats, emit, stop_event)
+            all_findings += proven
+            emit({"type": "step", "n": n, "tool": "payload-probe", "status": "done",
+                  "text": f"Payload testing — {len(proven)} proven"})
 
     # Targeted intrusive validation on the best gf candidates (pentest mode only)
     if mode == "pentest" and not _stopped(stop_event):
@@ -334,12 +352,10 @@ def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
             if not tool or not tool.installed or not cand:
                 continue
             purl = next((u for u in cand if host in u), cand[0])
-            if autonomy != "auto":
-                emit({"type": "approval_required", "tool": tname,
-                      "text": f"Intrusive {tname} on {purl} held for operator approval."})
-                continue
             if _stopped(stop_event):
                 break
+            if not _approve(tname, f"Intrusive {tname} validation on {purl}"):
+                continue
             n += 1
             emit({"type": "reasoning", "text": f"Validating {tname} on gf-{tname} candidate: {purl}"})
             res = executor.run(target, tname, host, {"param_url": purl}, stop_event)
@@ -651,11 +667,11 @@ def _run_sim(target: Target, mode: str, autonomy: str, emit: Emit,
 # ------------------------------------------------------------------ entry point
 def run_assessment(target: Target, mode: str, autonomy: str, emit: Emit,
                    on_finding: Callable[[dict], None], stop_event: threading.Event | None = None,
-                   profile: str = "full") -> str:
+                   profile: str = "full", ask_approval: Callable[[str], bool] | None = None) -> str:
     emit({"type": "note", "text": f"Engine: {'LIVE (Claude)' if settings.ai_live else 'SIMULATION'}"})
     try:
         if settings.ai_live:
-            return _run_live(target, mode, autonomy, emit, on_finding, stop_event, profile)
+            return _run_live(target, mode, autonomy, emit, on_finding, stop_event, profile, ask_approval)
         return _run_sim(target, mode, autonomy, emit, on_finding, stop_event)
     except Exception as e:  # noqa: BLE001
         emit({"type": "error", "text": f"engine error: {e}"})

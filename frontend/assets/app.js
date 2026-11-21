@@ -505,6 +505,28 @@ function addTimeline(cls, text) {
   d.innerHTML = `<span class="ic">${icons[cls] || "›"}</span><span>${esc(text)}</span>`;
   tl.appendChild(d); tl.scrollTop = tl.scrollHeight;
 }
+function renderApproval(e) {
+  const tl = $("#timeline"); if (!tl) return;
+  const d = document.createElement("div");
+  d.className = "timeline-step approval_required";
+  d.id = "appr-" + e.approval_id;
+  d.innerHTML = `<span class="ic">⏸</span><span>${esc(e.text)}
+    <div class="row" style="margin-top:8px;gap:8px">
+      <button class="btn sm" data-appr="approve">✓ Approve</button>
+      <button class="btn danger sm" data-appr="deny">✗ Deny</button>
+    </div></span>`;
+  tl.appendChild(d); tl.scrollTop = tl.scrollHeight;
+  d.querySelectorAll("[data-appr]").forEach((b) => b.addEventListener("click", async () => {
+    d.querySelectorAll("[data-appr]").forEach((x) => (x.disabled = true));
+    const approved = b.dataset.appr === "approve";
+    try {
+      await api(`/api/scans/${State.scan.id}/approve`, {
+        method: "POST", body: JSON.stringify({ approval_id: e.approval_id, approved }),
+      });
+    } catch (err) { toast("Approval failed: " + err.message); d.querySelectorAll("[data-appr]").forEach((x) => (x.disabled = false)); }
+  }));
+}
+
 function addTerm(cls, text) {
   const term = $("#terminal"); if (!term) return;
   const d = document.createElement("div");
@@ -519,7 +541,16 @@ function handleEvent(e) {
     case "plan": renderPlan(e.steps || []); break;
     case "step": updateStep(e.n, e.status, e.text); break;
     case "reasoning": addTimeline("reasoning", e.text); break;
-    case "approval_required": addTimeline("approval_required", e.text); break;
+    case "approval_required":
+      if (e.approval_id) renderApproval(e);
+      else addTimeline("approval_required", e.text);
+      break;
+    case "approval_resolved": {
+      const box = document.getElementById("appr-" + e.approval_id);
+      if (box) box.remove();
+      addTimeline("approval_required", e.text);
+      break;
+    }
     case "exec":
       addTerm("cmd", "$ " + e.command);
       if (!e.ok) addTerm("denied", "✗ " + (e.denied_reason || "failed"));

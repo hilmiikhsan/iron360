@@ -9,7 +9,7 @@ from ..config import get_settings
 from ..database import SessionLocal, get_db
 from ..engine import runner
 from ..models import Finding, Scan, Target, User
-from ..schemas import ScanCreate, ScanOut
+from ..schemas import ApprovalDecision, ScanCreate, ScanOut
 from ..security import get_current_user
 
 router = APIRouter(prefix="/api/scans", tags=["scans"])
@@ -70,6 +70,21 @@ def stop_scan(scan_id: int, db: Session = Depends(get_db), user: User = Depends(
         db.commit()
         record(db, actor=user.username, action="scan_stop", detail=f"scan_id={scan_id}")
     return scan
+
+
+@router.post("/{scan_id}/approve")
+def approve_step(scan_id: int, body: ApprovalDecision,
+                 db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Operator decision for an intrusive step held in Approve mode."""
+    scan = db.get(Scan, scan_id)
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    ok = runner.submit_approval(scan_id, body.approval_id, body.approved)
+    if not ok:
+        raise HTTPException(status_code=409, detail="No pending approval with that id (expired or already decided)")
+    record(db, actor=user.username, action="scan_approval", target_value=scan.target.value if scan.target else "",
+           detail=f"scan_id={scan_id} approval_id={body.approval_id} approved={body.approved}")
+    return {"ok": True, "approval_id": body.approval_id, "approved": body.approved}
 
 
 def _fkey(f: Finding) -> str:
