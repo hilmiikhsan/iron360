@@ -264,6 +264,91 @@ def test_security_headers(client, base_url: str) -> dict | None:
               "1. Add headers. 2. nginx -t && reload. 3. Re-test: curl -I must show them.")
 
 
+_GRAPHQL_PATHS = ["/graphql", "/api/graphql", "/v1/graphql", "/graphql/console", "/graphiql", "/query"]
+_INTROSPECT = {"query": "{__schema{queryType{name} types{name}}}"}
+
+# path -> (regex signature proving real exposure)  [HackTricks pentesting-web / OWASP A01/A05]
+_EXPOSED_PATHS = {
+    "/.git/config": re.compile(r"\[core\]|repositoryformatversion"),
+    "/.env": re.compile(r"(APP_KEY|DB_PASSWORD|SECRET|API_KEY|AWS_)"),
+    "/.svn/entries": re.compile(r"^\d+\s|svn://|dir"),
+    "/server-status": re.compile(r"Apache Server Status"),
+    "/actuator/health": re.compile(r'"status"\s*:\s*"(UP|DOWN)"'),
+    "/actuator/env": re.compile(r'"(propertySources|activeProfiles)"'),
+    "/phpinfo.php": re.compile(r"phpinfo\(\)|PHP Version"),
+    "/.aws/credentials": re.compile(r"aws_access_key_id", re.I),
+    "/wp-config.php.bak": re.compile(r"DB_PASSWORD|DB_NAME"),
+    "/.DS_Store": re.compile(r"Bud1"),
+}
+
+
+def test_graphql(client, base_url: str) -> dict | None:
+    for path in _GRAPHQL_PATHS:
+        url = base_url.rstrip("/") + path
+        try:
+            r = client.post(url, json=_INTROSPECT)
+        except Exception:  # noqa: BLE001
+            continue
+        if r is None:
+            continue
+        body = r.text
+        if r.status_code == 200 and "__schema" in body and ('"types"' in body or '"queryType"' in body):
+            return _f("GraphQL introspection enabled", "medium", "confirmed", 85, url, "A05",
+                      "GraphQL API vulnerabilities",
+                      "The GraphQL endpoint answers introspection — the full schema (types, queries, mutations) is exposed.",
+                      f"POST {path} with an introspection query returned a populated __schema.",
+                      "Disable introspection in production; enforce auth + query depth/complexity limits.",
+                      "# Apollo Server\nnew ApolloServer({ introspection: false });",
+                      "1. Disable introspection in prod. 2. Re-test — introspection must return an error.")
+    return None
+
+
+def test_exposed_paths(client, base_url: str) -> dict | None:
+    hits = []
+    for path, sig in _EXPOSED_PATHS.items():
+        r = _get(client, base_url.rstrip("/") + path)
+        if r is not None and r.status_code == 200 and sig.search(r.text):
+            hits.append(path)
+    if hits:
+        sev = "high" if any(p in hits for p in ("/.env", "/.git/config", "/.aws/credentials",
+                                                "/wp-config.php.bak", "/actuator/env")) else "medium"
+        return _f("Sensitive files / endpoints exposed", sev, "confirmed", 90, base_url, "A05",
+                  "Information disclosure",
+                  "Internal config/VCS/debug endpoints are publicly reachable and leak sensitive data.",
+                  "Exposed with matching content: " + ", ".join(hits),
+                  "Block these paths at the web server; remove them from the web root; rotate any leaked secrets.",
+                  ("# nginx — deny dotfiles & debug endpoints\n"
+                   "location ~ /\\.(git|svn|env|aws|DS_Store) { deny all; return 404; }\n"
+                   "location /actuator { deny all; }\nlocation /server-status { deny all; }"),
+                  "1. Block/remove the paths. 2. Rotate leaked secrets. 3. Re-test — each must return 403/404.")
+    return None
+
+
+def test_http_methods(client, base_url: str) -> dict | None:
+    try:
+        r = client.request("OPTIONS", base_url)
+    except Exception:  # noqa: BLE001
+        r = None
+    allow = (r.headers.get("allow", "") if r is not None else "").upper()
+    risky = [m for m in ("PUT", "DELETE", "TRACE", "CONNECT", "PATCH") if m in allow]
+    # TRACE → Cross-Site Tracing (XST)
+    try:
+        rt = client.request("TRACE", base_url)
+        trace_on = rt is not None and rt.status_code == 200 and "TRACE" in rt.text.upper()
+    except Exception:  # noqa: BLE001
+        trace_on = False
+    if risky or trace_on:
+        detail = (f"OPTIONS Allow: {allow}. " if risky else "") + ("TRACE enabled (XST). " if trace_on else "")
+        return _f("Dangerous HTTP methods enabled", "medium" if ("PUT" in risky or "DELETE" in risky) else "low",
+                  "confirmed", 80, base_url, "A05", "HTTP methods misconfiguration",
+                  "The server permits write/debug HTTP methods that should be disabled.",
+                  detail.strip(),
+                  "Disable PUT/DELETE/TRACE/CONNECT unless explicitly required; allow only GET/POST/HEAD.",
+                  "# nginx\nif ($request_method !~ ^(GET|POST|HEAD)$) { return 405; }",
+                  "1. Restrict methods. 2. Re-test OPTIONS/TRACE — risky methods must be rejected.")
+    return None
+
+
 # ------------------------------------------------------------- helpers
 def _elapsed(client, url: str) -> float | None:
     t0 = time.time()
@@ -317,8 +402,10 @@ def run_probes(target: Target, cats: dict, emit, stop_event: threading.Event | N
             host = scope.normalize_host(target.value)
             if scope.check(target, host).allowed:
                 base_url = f"https://{host}"
-                emit({"type": "reasoning", "text": "Active target-level probes: CORS, CRLF, Host-header, security headers."})
-                for fn in (test_cors, test_crlf, test_host_header, test_security_headers):
+                emit({"type": "reasoning", "text": "Active target-level probes: CORS, CRLF, Host-header, security headers, "
+                      "GraphQL introspection, exposed files, HTTP methods."})
+                for fn in (test_cors, test_crlf, test_host_header, test_security_headers,
+                           test_graphql, test_exposed_paths, test_http_methods):
                     if stop_event is not None and stop_event.is_set():
                         break
                     try:

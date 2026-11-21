@@ -411,7 +411,7 @@ _OWASP_2021 = [
     ("A02", "Cryptographic Failures", "sslscan TLS/cipher audit, HSTS header check"),
     ("A03", "Injection", "active probes: SQLi/XSS/OS-cmd(commix)/SSTI/CRLF + sqlmap/dalfox + nuclei"),
     ("A04", "Insecure Design", "flagged for manual review (business-logic)"),
-    ("A05", "Security Misconfiguration", "security-header + CORS probe, nikto, exposed-file detection, nuclei misconfig"),
+    ("A05", "Security Misconfiguration", "security-header/CORS/HTTP-method probe, GraphQL introspection, exposed .git/.env/actuator, nikto, nuclei misconfig"),
     ("A06", "Vulnerable & Outdated Components", "nmap -sV, nuclei CVE templates, CVE/NVD enrichment, Exploit-DB correlation, wpscan"),
     ("A07", "Identification & Auth Failures", "nuclei default-login/exposure; deeper auth testing manual"),
     ("A08", "Software & Data Integrity Failures", "nuclei deserialization/exposure templates"),
@@ -450,14 +450,20 @@ def _ai_extract_findings(target: Target, collected: list[tuple[str, str, str]], 
     if "sqli-candidates" in present or "sqlmap" in present:
         rag_queries.append("SQL injection payload bypass WAF union based blind")
     if "xss-candidates" in present or "dalfox" in present:
-        rag_queries.append("XSS payload filter bypass reflected DOM")
+        rag_queries.append("XSS payload filter bypass reflected DOM polyglot")
     if "lfi-candidates" in present:
-        rag_queries.append("local file inclusion path traversal payload")
+        rag_queries.append("local file inclusion path traversal payload wrapper php filter")
     if "ssrf-candidates" in present:
-        rag_queries.append("SSRF payload bypass internal metadata")
-    if not rag_queries:
-        rag_queries.append("web application security headers misconfiguration")
-    rag = "\n\n".join(kb_index.brief(q, k=3) for q in rag_queries[:3])
+        rag_queries.append("SSRF payload bypass internal metadata gopher 169.254.169.254")
+    if "rce-candidates" in present or "commix" in present:
+        rag_queries.append("OS command injection payload bypass filter blind time based")
+    if "ssti-candidates" in present:
+        rag_queries.append("server side template injection payload jinja2 twig freemarker RCE")
+    if "redirect-candidates" in present:
+        rag_queries.append("open redirect bypass payload URL parser confusion")
+    # Always pull misconfig/exposure knowledge for the target-level probes (CORS/headers/GraphQL/git/methods).
+    rag_queries.append("CORS misconfiguration GraphQL introspection exposed .git .env security headers HTTP methods")
+    rag = "\n\n".join(kb_index.brief(q, k=3) for q in rag_queries[:5])
     if rag.strip():
         emit({"type": "reasoning", "text": "Retrieved payloads/techniques from corpus (PayloadsAllTheThings/writeups) for analysis."})
 
