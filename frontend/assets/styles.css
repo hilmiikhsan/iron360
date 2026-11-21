@@ -210,9 +210,91 @@ tr.clickable:hover { background: var(--surface-2); cursor: pointer; }
 .modal h3 { margin: 0 0 16px; }
 .inline-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 
+/* --------------- Pentest Agent Console (Claude Code style) --------------- */
+.agent-console {
+  display: flex; flex-direction: column; height: calc(100vh - 120px);
+  background: var(--bg); border: 1px solid var(--border); border-radius: 13px; overflow: hidden;
+}
+.agent-stream {
+  flex: 1; overflow-y: auto; padding: 20px 24px; display: flex; flex-direction: column; gap: 6px;
+}
+.agent-welcome { padding: 40px 0; text-align: center; }
+.agent-welcome-title { font-size: 20px; font-weight: 700; color: var(--fg); margin-bottom: 6px; }
+.agent-welcome-sub { font-size: 13px; color: var(--muted); margin-bottom: 20px; }
+.agent-examples { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+.agent-example {
+  background: var(--surface-2); border: 1px solid var(--border-2); border-radius: 8px;
+  padding: 7px 14px; font-size: 12.5px; color: var(--muted); cursor: pointer;
+}
+.agent-example:hover { color: var(--accent); border-color: var(--accent); }
+
+/* Agent blocks — each event is a block in the stream */
+.ag-block { font-size: 13px; line-height: 1.6; }
+.ag-block + .ag-block { margin-top: 2px; }
+
+/* User prompt */
+.ag-user { padding: 12px 0 6px; border-top: 1px solid var(--border); }
+.ag-user:first-child { border-top: none; }
+.ag-prompt { color: var(--accent); font-weight: 700; font-family: var(--mono); }
+.ag-user-text { color: var(--fg); font-weight: 600; }
+
+/* Thinking */
+.ag-thinking { color: var(--muted-2); }
+.ag-thinking-indicator { font-size: 12px; animation: pulse 1.2s ease-in-out infinite; }
+.ag-thinking-text { font-size: 12px; color: var(--muted-2); font-style: italic; opacity: .7; display: block; padding-left: 16px; border-left: 2px solid var(--border); }
+
+/* Agent text (AI response) */
+.ag-text { color: var(--fg); padding: 4px 0; }
+.ag-text b { color: var(--fg); }
+.ag-h2 { font-size: 14px; font-weight: 700; margin: 8px 0 4px; color: var(--fg); }
+.ag-h3 { font-size: 13px; font-weight: 700; margin: 6px 0 2px; color: var(--fg); }
+.ag-li { padding-left: 16px; }
+.ag-inline-code { background: var(--surface-2); padding: 1px 5px; border-radius: 4px; font-family: var(--mono); font-size: 12px; }
+.ag-codeblock { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; font-family: var(--mono); font-size: 12px; overflow-x: auto; margin: 6px 0; white-space: pre-wrap; word-break: break-word; }
+
+/* Tool execution block */
+.ag-tool { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; margin: 6px 0; overflow: hidden; }
+.ag-tool-head { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--border); font-size: 12.5px; }
+.ag-tool-icon { color: var(--accent); }
+.ag-tool-name { font-family: var(--mono); font-weight: 700; color: var(--accent); }
+.ag-tool-host { color: var(--muted); font-size: 11.5px; }
+.ag-tool-spinner { margin-left: auto; color: var(--accent); animation: pulse 1s ease-in-out infinite; font-size: 10px; }
+.ag-tool-done-icon { margin-left: auto; font-size: 12px; color: var(--ok); }
+.ag-tool-output { max-height: 300px; overflow-y: auto; padding: 6px 14px; font-family: var(--mono); font-size: 11.5px; line-height: 1.45; color: #c3d0e0; }
+.ag-tool-line { white-space: pre-wrap; word-break: break-word; }
+.ag-tool-info { padding: 4px 14px 6px; font-size: 11px; color: var(--muted); font-family: var(--mono); border-top: 1px solid var(--border); }
+
+/* Finding */
+.ag-finding { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; margin: 4px 0; }
+.ag-finding-sev { font-size: 10.5px; font-weight: 700; padding: 2px 8px; border-radius: 6px; text-transform: uppercase; letter-spacing: .5px; }
+.ag-sev-critical { color: var(--critical); background: rgba(244,63,94,.12); }
+.ag-sev-high { color: var(--high); background: rgba(251,146,60,.12); }
+.ag-sev-medium { color: var(--medium); background: rgba(251,191,36,.12); }
+.ag-sev-low { color: var(--low); background: rgba(56,189,248,.12); }
+.ag-sev-info { color: var(--info); background: rgba(100,116,139,.12); }
+
+/* System / error */
+.ag-system .ag-system { color: var(--muted); font-size: 12px; }
+.ag-error .ag-error { color: var(--critical); font-weight: 600; }
+
+/* Input bar (bottom) */
+.agent-input-bar { border-top: 1px solid var(--border); padding: 10px 16px; background: var(--surface); }
+.agent-status-line { font-size: 11px; color: var(--muted-2); min-height: 16px; padding-bottom: 4px; animation: pulse 1.2s ease-in-out infinite; }
+.agent-status-line:empty { display: none; animation: none; }
+.agent-input-row { display: flex; gap: 8px; align-items: flex-end; }
+.agent-input-row textarea {
+  flex: 1; resize: none; min-height: 36px; max-height: 120px;
+  font-size: 13.5px; padding: 8px 14px; border-radius: 10px;
+  font-family: var(--mono);
+}
+.agent-input-row .btn { flex: none; min-width: 42px; }
+
 @media (max-width: 1000px) {
   .shell { grid-template-columns: 1fr; }
   .sidebar { flex-direction: row; overflow-x: auto; border-right: none; border-bottom: 1px solid var(--border); }
   .sidebar .brand, .nav-sep, .sidebar .spacer { display: none; }
   .console { grid-template-columns: 1fr; }
+  .agent-console { height: calc(100vh - 100px); }
+  .agent-stream { padding: 14px 12px; }
+  .agent-input-row textarea { font-size: 13px; }
 }

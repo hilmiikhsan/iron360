@@ -165,11 +165,13 @@ def _phases(target: Target, mode: str, profile: str = "full") -> list[tuple[str,
 
     recon = []
     if is_domain:
-        # Run ALL subdomain enum tools — results are merged + deduped after collection.
-        recon.append(("subfinder",    host, {}, "Subdomain enum — subfinder"))
-        recon.append(("assetfinder",  host, {}, "Subdomain enum — assetfinder"))
-        recon.append(("amass",        host, {}, "Subdomain enum — amass (passive)"))
-        # URL archive tools — merged + deduped into uniq_urls below.
+        if mode == "pentest":
+            # Subdomain enum only in pentest — VA focuses on the single target domain.
+            recon.append(("subfinder",    host, {}, "Subdomain enum — subfinder"))
+            recon.append(("assetfinder",  host, {}, "Subdomain enum — assetfinder"))
+            recon.append(("amass",        host, {}, "Subdomain enum — amass (passive)"))
+            recon.append(("findomain",    host, {}, "Subdomain enum — findomain"))
+        # URL archive tools gather known paths/params on the target domain itself.
         recon.append(("gau",          host, {}, "Gather known URLs — Wayback/OTX (passive)"))
         recon.append(("waybackurls",  host, {}, "Gather URLs — Wayback Machine (passive)"))
     recon.append(("dnsx", host, {}, "Resolve DNS records"))
@@ -291,7 +293,7 @@ def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
                 # Merge results from all URL/subdomain tools; dedup happens below.
                 if tool_name in ("gau", "katana", "waybackurls", "hakrawler", "paramspider"):
                     url_lines += lines
-                elif tool_name in ("subfinder", "assetfinder", "amass"):
+                elif tool_name in ("subfinder", "assetfinder", "amass", "findomain"):
                     sub_lines += lines
             else:
                 emit({"type": "step", "n": n, "tool": tool_name, "status": "failed", "text": res.denied_reason or "failed"})
@@ -332,9 +334,9 @@ def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
     cats = categorize_urls(uniq_urls)
     if uniq_subs:
         emit({"type": "reasoning", "text":
-              f"Subdomains merged (subfinder+assetfinder+amass): {len(sub_lines)} raw → "
+              f"Subdomains merged (subfinder+assetfinder+amass+findomain): {len(sub_lines)} raw → "
               f"{len(uniq_subs)} unique after dedup."})
-        collected.append(("merged-subdomains", "merge+dedupe:subfinder+assetfinder+amass",
+        collected.append(("merged-subdomains", "merge+dedupe:subfinder+assetfinder+amass+findomain",
                           "\n".join(uniq_subs[:500])))
     if uniq_urls:
         emit({"type": "reasoning", "text":

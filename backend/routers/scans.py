@@ -9,7 +9,7 @@ from ..config import get_settings
 from ..database import SessionLocal, get_db
 from ..engine import runner
 from ..models import Finding, Scan, Target, User
-from ..schemas import ApprovalDecision, ScanCreate, ScanOut
+from ..schemas import ApprovalDecision, ChatMessage, ScanCreate, ScanOut
 from ..security import get_current_user
 
 router = APIRouter(prefix="/api/scans", tags=["scans"])
@@ -39,7 +39,11 @@ def create_scan(body: ScanCreate, db: Session = Depends(get_db), user: User = De
     db.refresh(scan)
     record(db, actor=user.username, action="scan_start", target_value=target.value,
            detail=f"mode={body.mode} profile={body.profile} autonomy={body.autonomy} scan_id={scan.id}")
-    runner.start_scan(scan.id)
+    if body.mode == "pentest" and get_settings().ai_live:
+        runner.start_pentest_session(scan.id)
+        db.refresh(scan)
+    else:
+        runner.start_scan(scan.id)
     return scan
 
 
@@ -64,12 +68,33 @@ def stop_scan(scan_id: int, db: Session = Depends(get_db), user: User = Depends(
     scan = db.get(Scan, scan_id)
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
-    if scan.status in {"queued", "running"}:
-        runner.request_stop(scan_id)  # signal the running thread to kill its subprocess and abort
+    if scan.status in {"queued", "running", "chat_active"}:
+        runner.request_stop(scan_id)
+        runner.end_pentest_session(scan_id)
         scan.status = "stopped"
+        from datetime import datetime, timezone
+        scan.finished_at = datetime.now(timezone.utc)
         db.commit()
         record(db, actor=user.username, action="scan_stop", detail=f"scan_id={scan_id}")
     return scan
+
+
+@router.post("/{scan_id}/chat")
+def chat_message(scan_id: int, body: ChatMessage,
+                 db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Send a message to the pentest agent. The agent processes it in the background
+    and streams events via the WebSocket."""
+    scan = db.get(Scan, scan_id)
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    if scan.status != "chat_active":
+        raise HTTPException(status_code=409, detail="Scan is not in chat mode")
+    ok = runner.submit_chat(scan_id, body.message)
+    if not ok:
+        raise HTTPException(status_code=409, detail="Agent is busy processing — wait for it to finish")
+    record(db, actor=user.username, action="pentest_chat", target_value=scan.target.value if scan.target else "",
+           detail=f"scan_id={scan_id} message_len={len(body.message)}")
+    return {"ok": True, "scan_id": scan_id}
 
 
 @router.post("/{scan_id}/approve")
@@ -173,7 +198,7 @@ async def stream(websocket: WebSocket, scan_id: int, token: str | None = None):
         while True:
             event = await q.get()
             await websocket.send_json(event)
-            if event.get("type") in {"done", "error"}:
+            if event.get("type") in {"done", "error", "session_end"}:
                 break
     except WebSocketDisconnect:
         pass

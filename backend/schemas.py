@@ -117,6 +117,10 @@ class FindingStatusUpdate(BaseModel):
     status: str  # confirmed | likely | needs_review | false_positive
 
 
+class ChatMessage(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+
+
 class AuditOut(ORMModel):
     id: int
     at: dt.datetime

@@ -11,6 +11,7 @@ const State = {
   view: "dashboard",
   scan: null,      // active scan object
   ws: null,
+  activeMode: "pentest",  // "va" or "pentest"
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -200,6 +201,8 @@ const TITLES = { dashboard: "Dashboard", pentest: "AI Pentest Console", findings
 
 function setView(view) {
   State.view = view;
+  // Close any active WebSocket when navigating away from pentest
+  if (State.ws) { try { State.ws.close(); } catch (_) {} State.ws = null; }
   document.querySelectorAll("[data-nav]").forEach((a) => a.classList.toggle("active", a.dataset.nav === view));
   $("#viewTitle").textContent = TITLES[view] || "";
   const views = {
@@ -404,11 +407,46 @@ function viewPentest() {
   const t = currentTarget();
   const c = $("#content");
   if (!t) { c.innerHTML = emptyNoTarget(); bindEmpty(); return; }
+
+  // Mode selector at top
   c.innerHTML = `
+    <div class="row" style="margin-bottom:12px;gap:12px;align-items:center">
+      <label class="field" style="margin:0"><span style="display:none">Mode</span>
+        <div class="seg" id="modeSeg"><button data-mode="va">VA scan</button><button data-mode="pentest" class="on">Pentest</button></div>
+      </label>
+      ${t.authorized ? "" : `<span class="pill needs_review" style="font-size:12px">Target not authorized</span>`}
+    </div>
+    <div id="modeContent"></div>`;
+
+  let mode = "pentest";
+  $("#modeSeg").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
+    mode = b.dataset.mode;
+    $("#modeSeg").querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
+    renderModeContent(t, mode);
+  }));
+  renderModeContent(t, mode);
+}
+
+function renderModeContent(t, mode) {
+  const mc = $("#modeContent");
+  if (!mc) return;
+  // Disconnect any active WebSocket before switching modes
+  if (State.ws) { try { State.ws.close(); } catch (_) {} State.ws = null; }
+  _currentToolBlock = null;
+  State.activeMode = mode;
+  if (mode === "va") {
+    renderVAMode(t, mc);
+  } else {
+    renderPentestMode(t, mc);
+  }
+}
+
+function renderVAMode(t, mc) {
+  mc.innerHTML = `
     <div class="console">
       <div class="panel">
         <div class="phead">① Reasoning / Plan</div>
-        <div class="pbody" id="timeline"><div class="muted">Idle. Configure a run and press Start.</div></div>
+        <div class="pbody" id="timeline"><div class="muted">Idle. Configure and press Start.</div></div>
       </div>
       <div class="panel">
         <div class="phead">② Live Execution <span class="muted" id="execHost">· ${esc(t.value)}</span></div>
@@ -417,9 +455,6 @@ function viewPentest() {
       <div class="panel controls">
         <div class="phead">③ Controls</div>
         <div class="pbody">
-          <label class="field"><span>Mode</span>
-            <div class="seg" id="modeSeg"><button data-mode="va">VA scan</button><button data-mode="pentest" class="on">Pentest</button></div>
-          </label>
           <label class="field"><span>Scan profile</span>
             <select id="profileSel" class="sel">
               <option value="full" selected>Full — deepest coverage</option>
@@ -429,32 +464,203 @@ function viewPentest() {
               <option value="compliance">Compliance — credentialed CIS</option>
             </select>
           </label>
-          <label class="field"><span>Autonomy</span>
-            <div class="seg" id="autoSeg"><button data-auto="auto">Auto</button><button data-auto="approve" class="on">Approve intrusive</button></div>
-          </label>
           <div class="row" style="margin:14px 0 6px">
             <button class="btn sm" id="startBtn">▶ Start assessment</button>
             <button class="btn ghost sm" id="stopBtn" disabled>■ Stop</button>
           </div>
-          ${t.authorized ? "" : `<div class="hint" style="border-color:var(--warn);color:var(--warn)">Target is not authorized — mark it authorized in Targets &amp; Scope before scanning.</div>`}
-          <div class="hint">The AI plans and decides; it never runs a shell. Every command is spawned by the executor only
-            after a scope check. Out-of-scope hosts are refused automatically. In <b>Approve</b> mode, intrusive steps
-            (ffuf, sqlmap) are held for your approval.</div>
+          <div class="hint">VA mode scans the target domain for vulnerabilities. No subdomain enum — focused on the single target.</div>
+        </div>
+      </div>
+    </div>`;
+  $("#startBtn").addEventListener("click", () => startScan(t, "va", "auto", $("#profileSel").value));
+  $("#stopBtn").addEventListener("click", stopScan);
+  resumeIfRunning(t);
+}
+
+function renderPentestMode(t, mc) {
+  mc.innerHTML = `
+    <div class="agent-console">
+      <div class="agent-stream" id="agentStream">
+        <div class="agent-welcome">
+          <div class="agent-welcome-title">Iron360 Pentest Agent</div>
+          <div class="agent-welcome-sub">Target: <b>${esc(t.value)}</b> · Type your instructions below</div>
+          <div class="agent-examples">
+            <span class="agent-example" data-msg="Enumerate subdomains lalu scan vulnerability">enumerate subdomains + scan vulns</span>
+            <span class="agent-example" data-msg="Run nmap full port scan with service detection">nmap full scan</span>
+            <span class="agent-example" data-msg="Find SQL injection on all known endpoints">find SQLi</span>
+            <span class="agent-example" data-msg="Run nuclei with critical and high severity templates">nuclei critical/high</span>
+          </div>
+        </div>
+      </div>
+      <div class="agent-input-bar" id="agentInputBar">
+        <div class="agent-status-line" id="agentStatus"></div>
+        <div class="agent-input-row">
+          <textarea id="chatInput" placeholder="What should I do?" rows="1"></textarea>
+          <button class="btn sm" id="chatSendBtn">↵</button>
+          <button class="btn danger sm" id="chatStopBtn" style="display:none">■ Stop</button>
         </div>
       </div>
     </div>`;
 
-  let mode = "pentest", autonomy = "approve";
-  $("#modeSeg").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
-    mode = b.dataset.mode; $("#modeSeg").querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
-  }));
-  $("#autoSeg").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
-    autonomy = b.dataset.auto; $("#autoSeg").querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
-  }));
-  $("#startBtn").addEventListener("click", () => startScan(t, mode, autonomy, $("#profileSel").value));
-  $("#stopBtn").addEventListener("click", stopScan);
-  // Auto-reconnect to any scan still running for this target after page refresh.
-  resumeIfRunning(t);
+  const input = $("#chatInput");
+  const sendBtn = $("#chatSendBtn");
+  const stopBtn = $("#chatStopBtn");
+
+  // Auto-resize textarea
+  input.addEventListener("input", () => {
+    input.style.height = "auto";
+    input.style.height = Math.min(input.scrollHeight, 120) + "px";
+  });
+
+  // Example chips
+  document.querySelectorAll(".agent-example").forEach((el) => {
+    el.addEventListener("click", () => { input.value = el.dataset.msg; input.focus(); input.dispatchEvent(new Event("input")); });
+  });
+
+  async function sendMessage() {
+    const msg = input.value.trim();
+    if (!msg) return;
+    if (!t.authorized) { toast("Target not authorized"); return; }
+    input.value = ""; input.style.height = "auto";
+    input.disabled = true;
+    sendBtn.disabled = true;
+    stopBtn.style.display = "";
+
+    // Hide welcome on first message
+    const wel = document.querySelector(".agent-welcome");
+    if (wel) wel.style.display = "none";
+
+    // Create pentest session if needed
+    if (!State.scan || State.scan.status === "done" || State.scan.status === "stopped" || State.scan.status === "failed") {
+      try {
+        const scan = await api("/api/scans", { method: "POST", body: JSON.stringify({ target_id: t.id, mode: "pentest", autonomy: "auto", profile: "full" }) });
+        State.scan = scan;
+        try { localStorage.setItem(`iron360_active_scan_${t.id}`, scan.id); } catch (_) {}
+        openScanStream(scan.id);
+        await new Promise((r) => setTimeout(r, 300));
+      } catch (e) { toast(e.message); input.disabled = false; sendBtn.disabled = false; stopBtn.style.display = "none"; return; }
+    }
+
+    try {
+      await api(`/api/scans/${State.scan.id}/chat`, { method: "POST", body: JSON.stringify({ message: msg }) });
+    } catch (e) {
+      toast(e.message);
+      input.disabled = false; sendBtn.disabled = false;
+    }
+  }
+
+  sendBtn.addEventListener("click", sendMessage);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+  });
+  stopBtn.addEventListener("click", stopScan);
+  resumePentestIfActive(t);
+}
+
+async function resumePentestIfActive(t) {
+  let savedId;
+  try { savedId = localStorage.getItem(`iron360_active_scan_${t.id}`); } catch (_) {}
+  if (!savedId) return;
+  try {
+    const scan = await api(`/api/scans/${savedId}`);
+    if (scan.mode === "pentest" && (scan.status === "chat_active" || scan.status === "running" || scan.status === "queued")) {
+      State.scan = scan;
+      const stopBtn = $("#chatStopBtn");
+      if (stopBtn) stopBtn.style.display = "";
+      const wel = document.querySelector(".agent-welcome");
+      if (wel) wel.style.display = "none";
+      agentAppend("system", "Reconnected to session #" + scan.id);
+      openScanStream(scan.id);
+    } else {
+      try { localStorage.removeItem(`iron360_active_scan_${t.id}`); } catch (_) {}
+    }
+  } catch (_) {
+    try { localStorage.removeItem(`iron360_active_scan_${t.id}`); } catch (_) {}
+  }
+}
+
+// ---- Agent stream rendering (Claude-Code style) ----
+let _currentToolBlock = null;
+
+function agentAppend(type, content, meta) {
+  const stream = $("#agentStream");
+  if (!stream) return null;
+  const el = document.createElement("div");
+  el.className = "ag-block ag-" + type;
+
+  if (type === "user") {
+    el.innerHTML = `<span class="ag-prompt">❯</span> <span class="ag-user-text">${esc(content)}</span>`;
+  } else if (type === "thinking") {
+    el.innerHTML = `<span class="ag-thinking-indicator">⟳ Thinking…</span>`;
+    el.id = "agThinking";
+  } else if (type === "thinking_text") {
+    el.innerHTML = `<span class="ag-thinking-text">${esc(content).replace(/\n/g, "<br>")}</span>`;
+  } else if (type === "text") {
+    el.innerHTML = formatAgentMarkdown(content);
+  } else if (type === "tool_start") {
+    const toolName = meta?.tool || "";
+    el.className = "ag-block ag-tool";
+    el.innerHTML = `<div class="ag-tool-head"><span class="ag-tool-icon">⚡</span> <span class="ag-tool-name">${esc(toolName)}</span> <span class="ag-tool-host">${esc(meta?.host || "")}</span><span class="ag-tool-spinner">●</span></div><div class="ag-tool-output" id="agToolOut_${Date.now()}"></div>`;
+    _currentToolBlock = el.querySelector(".ag-tool-output");
+  } else if (type === "tool_line") {
+    if (_currentToolBlock) {
+      const line = document.createElement("div");
+      line.className = "ag-tool-line";
+      line.textContent = content;
+      _currentToolBlock.appendChild(line);
+      _currentToolBlock.scrollTop = _currentToolBlock.scrollHeight;
+      stream.scrollTop = stream.scrollHeight;
+      return null;
+    }
+    return null;
+  } else if (type === "tool_done") {
+    if (_currentToolBlock) {
+      const parent = _currentToolBlock.closest(".ag-tool");
+      if (parent) {
+        const spinner = parent.querySelector(".ag-tool-spinner");
+        if (spinner) {
+          spinner.className = "ag-tool-done-icon";
+          if (meta?.ok) { spinner.textContent = "✓"; spinner.style.color = "var(--ok)"; }
+          else { spinner.textContent = "✗"; spinner.style.color = "var(--critical)"; }
+        }
+        const info = document.createElement("div");
+        info.className = "ag-tool-info";
+        info.textContent = meta?.ok ? `exit ${meta.exit_code} · ${meta.duration_s}s` : (meta.denied_reason || "failed");
+        parent.appendChild(info);
+      }
+    }
+    _currentToolBlock = null;
+    stream.scrollTop = stream.scrollHeight;
+    return null;
+  } else if (type === "finding") {
+    el.className = "ag-block ag-finding";
+    el.innerHTML = `<span class="ag-finding-sev ag-sev-${esc(meta?.severity || "info")}">${esc((meta?.severity || "INFO").toUpperCase())}</span> ${esc(meta?.title || content)}`;
+  } else if (type === "system") {
+    el.innerHTML = `<span class="ag-system">${esc(content)}</span>`;
+  } else if (type === "error") {
+    el.innerHTML = `<span class="ag-error">✗ ${esc(content)}</span>`;
+  }
+
+  stream.appendChild(el);
+  stream.scrollTop = stream.scrollHeight;
+  return el;
+}
+
+function formatAgentMarkdown(text) {
+  let s = esc(text);
+  // Code blocks
+  s = s.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre class="ag-codeblock"><code>$2</code></pre>');
+  // Headers
+  s = s.replace(/^### (.+)$/gm, '<div class="ag-h3">$1</div>');
+  s = s.replace(/^## (.+)$/gm, '<div class="ag-h2">$1</div>');
+  // Bold, inline code
+  s = s.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');
+  s = s.replace(/`(.*?)`/g, '<code class="ag-inline-code">$1</code>');
+  // Lists
+  s = s.replace(/^- (.+)$/gm, '<div class="ag-li">· $1</div>');
+  // Newlines
+  s = s.replace(/\n/g, '<br>');
+  return s;
 }
 
 async function startScan(t, mode, autonomy, profile) {
@@ -480,14 +686,15 @@ async function resumeIfRunning(t) {
   if (!savedId) return;
   try {
     const scan = await api(`/api/scans/${savedId}`);
-    if (scan.status === "running" || scan.status === "queued") {
+    // Only reconnect VA scans (running/queued), not pentest chat sessions
+    if ((scan.status === "running" || scan.status === "queued") && scan.mode === "va") {
       State.scan = scan;
       const sb = $("#startBtn"), stb = $("#stopBtn");
       if (sb) sb.disabled = true;
       if (stb) stb.disabled = false;
       addTimeline("note", `↩ Scan #${scan.id} still running — reconnecting stream…`);
       openScanStream(scan.id);
-    } else {
+    } else if (scan.status === "done" || scan.status === "stopped" || scan.status === "failed") {
       try { localStorage.removeItem(`iron360_active_scan_${t.id}`); } catch (_) {}
     }
   } catch (_) {
@@ -496,11 +703,23 @@ async function resumeIfRunning(t) {
 }
 
 function openScanStream(scanId) {
+  if (State.ws) { try { State.ws.close(); } catch (_) {} }
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${location.host}/api/scans/${scanId}/stream?token=${encodeURIComponent(State.token)}`);
   State.ws = ws;
   ws.onmessage = (ev) => handleEvent(JSON.parse(ev.data));
-  ws.onclose = () => { $("#startBtn") && ($("#startBtn").disabled = false); $("#stopBtn") && ($("#stopBtn").disabled = true); };
+  ws.onclose = () => {
+    // Re-enable controls for whichever mode is active
+    if (State.activeMode === "pentest") {
+      const inp = $("#chatInput"); if (inp) inp.disabled = false;
+      const sb = $("#chatSendBtn"); if (sb) sb.disabled = false;
+      const stopB = $("#chatStopBtn"); if (stopB) stopB.style.display = "none";
+      setAgentStatusLine("");
+    } else {
+      const sb = $("#startBtn"); if (sb) sb.disabled = false;
+      const stb = $("#stopBtn"); if (stb) stb.disabled = true;
+    }
+  };
   ws.onerror = () => toast("Stream error");
 }
 
@@ -565,8 +784,9 @@ function addTerm(cls, text) {
 }
 
 function handleEvent(e) {
+  // --- VA mode events (timeline + terminal panels) ---
   switch (e.type) {
-    case "note": addTimeline("note", e.text); break;
+    case "note": addTimeline("note", e.text); agentAppend("system", e.text); break;
     case "plan": renderPlan(e.steps || []); break;
     case "step": updateStep(e.n, e.status, e.text); break;
     case "reasoning": addTimeline("reasoning", e.text); break;
@@ -581,16 +801,18 @@ function handleEvent(e) {
       break;
     }
     case "log":
-      // Real-time streaming: each tool stdout line arrives as a "log" event.
       addTerm("out", e.line || e.text || "");
+      agentAppend("tool_line", e.line || e.text || "");
       break;
     case "exec":
       addTerm("cmd", "$ " + e.command);
       if (!e.ok) addTerm("denied", "✗ " + (e.denied_reason || "failed"));
       else addTerm("ok", `✓ exit ${e.exit_code} · ${e.duration_s}s`);
+      agentAppend("tool_done", "", { ok: e.ok, exit_code: e.exit_code, duration_s: e.duration_s, denied_reason: e.denied_reason });
       break;
     case "finding":
       addTimeline("finding", `${(e.finding.status || "").toUpperCase()} · ${e.finding.severity} · ${e.finding.title} (conf ${e.finding.confidence}%)`);
+      agentAppend("finding", e.finding.title, { severity: e.finding.severity, title: e.finding.title });
       break;
     case "intel": {
       const items = e.items || [];
@@ -610,25 +832,91 @@ function handleEvent(e) {
     }
     case "finish": addTimeline("finish", e.text); break;
     case "done":
-      $("#startBtn") && ($("#startBtn").disabled = false); $("#stopBtn") && ($("#stopBtn").disabled = true);
-      // Clear saved scan so refresh doesn't attempt reconnect to a finished scan.
+      if ($("#startBtn")) $("#startBtn").disabled = false;
+      if ($("#stopBtn")) $("#stopBtn").disabled = true;
       if (State.currentTargetId) { try { localStorage.removeItem(`iron360_active_scan_${State.currentTargetId}`); } catch (_) {} }
       toast("Assessment complete");
       break;
-    case "error": addTimeline("error", e.text); break;
+
+    // ---- Pentest agent events (Claude Code style stream) ----
+    case "chat_ready":
+      break;
+    case "chat_user":
+      agentAppend("user", e.text);
+      break;
+    case "agent_thinking": {
+      const old = document.getElementById("agThinking");
+      if (old) old.remove();
+      agentAppend("thinking");
+      setAgentStatusLine("thinking…");
+      break;
+    }
+    case "agent_thinking_text": {
+      const old = document.getElementById("agThinking");
+      if (old) old.remove();
+      if (e.text && e.text.length > 0) {
+        agentAppend("thinking_text", e.text.length > 500 ? e.text.slice(0, 500) + "…" : e.text);
+      }
+      break;
+    }
+    case "agent_text":
+      agentAppend("text", e.text);
+      break;
+    case "agent_tool_start":
+      agentAppend("tool_start", "", { tool: e.tool, host: e.host });
+      break;
+    case "agent_status":
+      setAgentStatusLine(e.status);
+      break;
+    case "chat_turn_done": {
+      setAgentStatusLine("");
+      const inp = $("#chatInput"); if (inp) inp.disabled = false;
+      const sb = $("#chatSendBtn"); if (sb) sb.disabled = false;
+      const stopB = $("#chatStopBtn"); if (stopB) stopB.style.display = "none";
+      break;
+    }
+    case "error":
+      addTimeline("error", e.text);
+      agentAppend("error", e.text);
+      setAgentStatusLine("");
+      { const inp = $("#chatInput"); if (inp) inp.disabled = false; }
+      { const sb = $("#chatSendBtn"); if (sb) sb.disabled = false; }
+      break;
   }
+}
+
+function setAgentStatusLine(status) {
+  const el = $("#agentStatus");
+  if (el) el.textContent = status || "";
 }
 
 async function stopScan() {
   if (!State.scan) return;
-  // Respond instantly: flip buttons + close the stream before the API round-trip.
-  $("#startBtn").disabled = false; $("#stopBtn").disabled = true;
-  addTimeline("note", "Stopping… killing running tool.");
   const sid = State.scan.id;
-  if (State.ws) { try { State.ws.close(); } catch (_) {} State.ws = null; }
+
+  if (State.activeMode === "pentest") {
+    const chatStopBtn = $("#chatStopBtn"); if (chatStopBtn) chatStopBtn.style.display = "none";
+    agentAppend("system", "Stopping agent…");
+    setAgentStatusLine("");
+  } else {
+    const startBtn = $("#startBtn"); if (startBtn) startBtn.disabled = false;
+    const stopBtn = $("#stopBtn"); if (stopBtn) stopBtn.disabled = true;
+    addTimeline("note", "Stopping…");
+  }
+
+  // Call stop API first, then close WS
   try { await api(`/api/scans/${sid}/stop`, { method: "POST" }); } catch (_) {}
+  if (State.ws) { try { State.ws.close(); } catch (_) {} State.ws = null; }
+
+  // Re-enable inputs
+  if (State.activeMode === "pentest") {
+    const chatInput = $("#chatInput"); if (chatInput) chatInput.disabled = false;
+    const chatSendBtn = $("#chatSendBtn"); if (chatSendBtn) chatSendBtn.disabled = false;
+  }
+
   if (State.currentTargetId) { try { localStorage.removeItem(`iron360_active_scan_${State.currentTargetId}`); } catch (_) {} }
-  toast("Assessment stopped");
+  State.scan = null;
+  toast("Stopped");
 }
 
 /* ----------------------------- Findings ----------------------------- */

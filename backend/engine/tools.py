@@ -144,6 +144,12 @@ _register(Tool(
 ))
 
 _register(Tool(
+    name="findomain", binary="findomain", category="recon", intensity="passive",
+    description="Subdomain enumeration using certificate transparency + APIs (passive).",
+    build=lambda host, o: ["findomain", "-t", host, "-q"],
+))
+
+_register(Tool(
     name="dig", binary="dig", category="recon", intensity="passive",
     description="DNS lookup + attempt AXFR zone transfer against the domain's NS.",
     build=lambda host, o: ["dig", "+nocmd", "+noall", "+answer", "ANY", host],
