@@ -154,8 +154,18 @@ async def stream(websocket: WebSocket, scan_id: int, token: str | None = None):
         return
     await websocket.accept()
 
-    # Replay any events already produced, then live-stream new ones.
-    for event in runner.replay(scan_id):
+    # Replay any events already produced (from in-memory history), then live-stream new ones.
+    # Fallback: if memory history is empty (e.g. server restarted mid-scan), replay from DB timeline.
+    history = runner.replay(scan_id)
+    if not history:
+        db_fallback = SessionLocal()
+        try:
+            snap = db_fallback.get(Scan, scan_id)
+            if snap and snap.timeline:
+                history = snap.timeline
+        finally:
+            db_fallback.close()
+    for event in history:
         await websocket.send_json(event)
 
     q = runner.subscribe(scan_id)

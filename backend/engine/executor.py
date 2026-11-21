@@ -20,6 +20,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from ..config import get_settings
 from ..models import Target
@@ -50,7 +51,10 @@ def _extract_hosts(host: str, options: dict) -> list[str]:
 
 
 def run(target: Target, tool_name: str, host: str, options: dict | None = None,
-        stop_event: threading.Event | None = None) -> ExecResult:
+        stop_event: threading.Event | None = None,
+        line_emit: Callable[[str], None] | None = None) -> ExecResult:
+    """Execute a tool and return the result. If `line_emit` is provided, each stdout line is
+    forwarded to it in real-time so the frontend can stream output live (Claude-Code-style)."""
     options = options or {}
 
     if not settings.executor_enabled:
@@ -88,14 +92,19 @@ def run(target: Target, tool_name: str, host: str, options: dict | None = None,
     out_buf: list[str] = []
     err_buf: list[str] = []
 
-    def _drain(stream, buf):
+    def _drain(stream, buf, emit_line=None):
         try:
             for line in stream:
                 buf.append(line)
+                if emit_line:
+                    try:
+                        emit_line(line.rstrip("\n"))
+                    except Exception:  # noqa: BLE001
+                        pass
         except Exception:  # noqa: BLE001
             pass
 
-    t_out = threading.Thread(target=_drain, args=(proc.stdout, out_buf), daemon=True)
+    t_out = threading.Thread(target=_drain, args=(proc.stdout, out_buf, line_emit), daemon=True)
     t_err = threading.Thread(target=_drain, args=(proc.stderr, err_buf), daemon=True)
     t_out.start()
     t_err.start()

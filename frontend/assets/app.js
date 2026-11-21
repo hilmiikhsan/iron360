@@ -453,6 +453,8 @@ function viewPentest() {
   }));
   $("#startBtn").addEventListener("click", () => startScan(t, mode, autonomy, $("#profileSel").value));
   $("#stopBtn").addEventListener("click", stopScan);
+  // Auto-reconnect to any scan still running for this target after page refresh.
+  resumeIfRunning(t);
 }
 
 async function startScan(t, mode, autonomy, profile) {
@@ -462,8 +464,35 @@ async function startScan(t, mode, autonomy, profile) {
   try {
     const scan = await api("/api/scans", { method: "POST", body: JSON.stringify({ target_id: t.id, mode, autonomy, profile: profile || "full" }) });
     State.scan = scan;
+    // Persist so browser refresh can reconnect.
+    try { localStorage.setItem(`iron360_active_scan_${t.id}`, scan.id); } catch (_) {}
     openScanStream(scan.id);
   } catch (e) { toast(e.message); $("#startBtn").disabled = false; $("#stopBtn").disabled = true; }
+}
+
+/**
+ * On page load / view switch: if the previous scan for this target is still running,
+ * reconnect its WebSocket so the user doesn't lose context on a refresh.
+ */
+async function resumeIfRunning(t) {
+  let savedId;
+  try { savedId = localStorage.getItem(`iron360_active_scan_${t.id}`); } catch (_) {}
+  if (!savedId) return;
+  try {
+    const scan = await api(`/api/scans/${savedId}`);
+    if (scan.status === "running" || scan.status === "queued") {
+      State.scan = scan;
+      const sb = $("#startBtn"), stb = $("#stopBtn");
+      if (sb) sb.disabled = true;
+      if (stb) stb.disabled = false;
+      addTimeline("note", `↩ Scan #${scan.id} still running — reconnecting stream…`);
+      openScanStream(scan.id);
+    } else {
+      try { localStorage.removeItem(`iron360_active_scan_${t.id}`); } catch (_) {}
+    }
+  } catch (_) {
+    try { localStorage.removeItem(`iron360_active_scan_${t.id}`); } catch (_) {}
+  }
 }
 
 function openScanStream(scanId) {
@@ -551,13 +580,14 @@ function handleEvent(e) {
       addTimeline("approval_required", e.text);
       break;
     }
+    case "log":
+      // Real-time streaming: each tool stdout line arrives as a "log" event.
+      addTerm("out", e.line || e.text || "");
+      break;
     case "exec":
       addTerm("cmd", "$ " + e.command);
       if (!e.ok) addTerm("denied", "✗ " + (e.denied_reason || "failed"));
-      else {
-        addTerm("out", (e.output || "(no output)").slice(0, 4000));
-        addTerm("ok", `✓ exit ${e.exit_code} · ${e.duration_s}s`);
-      }
+      else addTerm("ok", `✓ exit ${e.exit_code} · ${e.duration_s}s`);
       break;
     case "finding":
       addTimeline("finding", `${(e.finding.status || "").toUpperCase()} · ${e.finding.severity} · ${e.finding.title} (conf ${e.finding.confidence}%)`);
@@ -581,6 +611,8 @@ function handleEvent(e) {
     case "finish": addTimeline("finish", e.text); break;
     case "done":
       $("#startBtn") && ($("#startBtn").disabled = false); $("#stopBtn") && ($("#stopBtn").disabled = true);
+      // Clear saved scan so refresh doesn't attempt reconnect to a finished scan.
+      if (State.currentTargetId) { try { localStorage.removeItem(`iron360_active_scan_${State.currentTargetId}`); } catch (_) {} }
       toast("Assessment complete");
       break;
     case "error": addTimeline("error", e.text); break;
@@ -595,6 +627,7 @@ async function stopScan() {
   const sid = State.scan.id;
   if (State.ws) { try { State.ws.close(); } catch (_) {} State.ws = null; }
   try { await api(`/api/scans/${sid}/stop`, { method: "POST" }); } catch (_) {}
+  if (State.currentTargetId) { try { localStorage.removeItem(`iron360_active_scan_${State.currentTargetId}`); } catch (_) {} }
   toast("Assessment stopped");
 }
 

@@ -165,8 +165,13 @@ def _phases(target: Target, mode: str, profile: str = "full") -> list[tuple[str,
 
     recon = []
     if is_domain:
-        recon.append(("subfinder", host, {}, "Enumerate subdomains (passive)"))
-        recon.append(("gau", host, {}, "Gather known URLs — Wayback/OTX (passive)"))
+        # Run ALL subdomain enum tools — results are merged + deduped after collection.
+        recon.append(("subfinder",    host, {}, "Subdomain enum — subfinder"))
+        recon.append(("assetfinder",  host, {}, "Subdomain enum — assetfinder"))
+        recon.append(("amass",        host, {}, "Subdomain enum — amass (passive)"))
+        # URL archive tools — merged + deduped into uniq_urls below.
+        recon.append(("gau",          host, {}, "Gather known URLs — Wayback/OTX (passive)"))
+        recon.append(("waybackurls",  host, {}, "Gather URLs — Wayback Machine (passive)"))
     recon.append(("dnsx", host, {}, "Resolve DNS records"))
 
     blocks: dict[str, tuple[str, list]] = {
@@ -265,18 +270,28 @@ def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
                 emit({"type": "step", "n": n, "tool": tool_name, "status": "skipped", "text": f"{tool_name} not installed"})
                 continue
             emit({"type": "step", "n": n, "tool": tool_name, "status": "running", "text": desc})
-            res = executor.run(target, tool_name, h, opts, stop_event)
+            # Real-time line streaming (Claude-Code-style): each stdout line is forwarded live.
+            _line_buf: list[str] = []
+            def _line_emit(line: str, _t=tool_name) -> None:
+                stripped = line.strip()
+                if stripped:
+                    _line_buf.append(stripped)
+                    emit({"type": "log", "tool": _t, "line": stripped})
+            res = executor.run(target, tool_name, h, opts, stop_event, line_emit=_line_emit)
+            # Only emit the exec summary (not the full buffered output — already streamed live).
             emit({"type": "exec", "tool": tool_name, "host": h, "command": res.command,
                   "ok": res.ok, "exit_code": res.exit_code, "denied_reason": res.denied_reason,
-                  "output": (res.stdout or res.stderr or res.denied_reason or "")[:6000],
+                  "output": (res.denied_reason or f"({len(_line_buf)} lines streamed live)") if res.ok else
+                             (res.stdout or res.stderr or res.denied_reason or "")[:3000],
                   "duration_s": round(res.duration_s, 1)})
             if res.ok:
                 emit({"type": "step", "n": n, "tool": tool_name, "status": "done", "text": f"{desc} — {res.duration_s:.1f}s"})
                 collected.append((tool_name, res.command, res.stdout or "(no output)"))
                 lines = [l.strip() for l in (res.stdout or "").splitlines() if l.strip()]
-                if tool_name in ("gau", "katana"):
+                # Merge results from all URL/subdomain tools; dedup happens below.
+                if tool_name in ("gau", "katana", "waybackurls", "hakrawler", "paramspider"):
                     url_lines += lines
-                elif tool_name == "subfinder":
+                elif tool_name in ("subfinder", "assetfinder", "amass"):
                     sub_lines += lines
             else:
                 emit({"type": "step", "n": n, "tool": tool_name, "status": "failed", "text": res.denied_reason or "failed"})
@@ -309,21 +324,27 @@ def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
                   "text": f"CPHunter — {sum(1 for c in cph if c['state']=='vulnerable')} vulnerable, "
                           f"{sum(1 for c in cph if c['state']=='inconclusive')} inconclusive"})
 
-    # Merge + dedupe + parameter extraction + gf-pattern tagging (3 Bugs methodology)
+    # Merge + dedupe + parameter extraction + gf-pattern tagging (3 Bugs methodology).
+    # All tool results (subfinder+assetfinder+amass, gau+waybackurls+katana, etc.) are
+    # combined here — the AI gets ONE clean merged dataset, not raw per-tool output.
     uniq_urls = sorted({u for u in url_lines if u.startswith("http")})
     uniq_subs = sorted(set(sub_lines))
     cats = categorize_urls(uniq_urls)
+    if uniq_subs:
+        emit({"type": "reasoning", "text":
+              f"Subdomains merged (subfinder+assetfinder+amass): {len(sub_lines)} raw → "
+              f"{len(uniq_subs)} unique after dedup."})
+        collected.append(("merged-subdomains", "merge+dedupe:subfinder+assetfinder+amass",
+                          "\n".join(uniq_subs[:500])))
     if uniq_urls:
         emit({"type": "reasoning", "text":
-              f"Merged URLs: {len(url_lines)} raw → {len(uniq_urls)} unique (deduped). "
-              f"Params: {len(cats['params'])} · SQLi-cand: {len(cats['sqli'])} · XSS-cand: {len(cats['xss'])} · "
-              f"LFI-cand: {len(cats['lfi'])} · sensitive files: {len(cats['sensitive_files'])} · JS: {len(cats['js'])}"})
-        collected.append(("merged-urls", "merge+dedupe", "\n".join(uniq_urls[:300])))
+              f"URLs merged (gau+waybackurls+katana): {len(url_lines)} raw → {len(uniq_urls)} unique. "
+              f"Params: {len(cats['params'])} · SQLi: {len(cats['sqli'])} · XSS: {len(cats['xss'])} · "
+              f"LFI: {len(cats['lfi'])} · sensitive: {len(cats['sensitive_files'])} · JS: {len(cats['js'])}"})
+        collected.append(("merged-urls", "merge+dedupe:gau+waybackurls+katana", "\n".join(uniq_urls[:300])))
         for cat in ("sqli", "xss", "lfi", "ssrf", "redirect", "rce", "ssti", "sensitive_files", "js"):
             if cats.get(cat):
                 collected.append((f"{cat}-candidates", "gf-pattern/python", "\n".join(cats[cat][:60])))
-    if uniq_subs:
-        emit({"type": "reasoning", "text": f"Subdomains discovered: {len(uniq_subs)} unique."})
 
     # Exploit-DB correlation on detected services (local CSV lookup, no target contact)
     nmap_out = next((out for (tn, _, out) in collected if tn == "nmap"), "")

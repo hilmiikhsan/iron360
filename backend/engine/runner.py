@@ -89,9 +89,21 @@ def _run(scan_id: int) -> None:
         _stop_events[scan_id] = stop_event
         timeline: list[dict] = []
 
+        _emit_count = [0]
+
         def emit(event: dict) -> None:
             timeline.append(event)
             _publish(scan_id, event)
+            # Periodically flush timeline to DB so a browser refresh can recover the history.
+            _emit_count[0] += 1
+            if _emit_count[0] % 20 == 0:
+                try:
+                    snap = db.get(Scan, scan_id)
+                    if snap:
+                        snap.timeline = list(timeline)
+                        db.commit()
+                except Exception:  # noqa: BLE001
+                    pass
 
         def ask_approval(approval_id: str, timeout: float = 300.0) -> bool:
             """Block the scan thread until the operator approves/denies, or timeout/stop (fail-closed)."""
