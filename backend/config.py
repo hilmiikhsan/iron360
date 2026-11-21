@@ -54,6 +54,13 @@ class Settings:
         self.tool_timeout: int = int(os.getenv("IRON360_TOOL_TIMEOUT", "600"))
         self.executor_enabled: bool = _bool(os.getenv("IRON360_EXECUTOR_ENABLED"), True)
 
+        # CPHunter CVE mass-scanner/exploiter integration (optional). Point at the
+        # CPHunter project dir on the executor host; detection runs in VA, exploit in PT.
+        self.cphunter_dir: str | None = os.getenv("IRON360_CPHUNTER_DIR") or None
+        self.cphunter_python: str = os.getenv("IRON360_CPHUNTER_PYTHON", "python3")
+        self.cphunter_workers: int = int(os.getenv("IRON360_CPHUNTER_WORKERS", "20"))
+        self.cphunter_timeout: float = float(os.getenv("IRON360_CPHUNTER_TIMEOUT", "10"))
+
         self.db_url: str = f"sqlite:///{DATA_DIR / 'iron360.db'}"
         self.evidence_dir: Path = DATA_DIR / "evidence"
         self.evidence_dir.mkdir(exist_ok=True)

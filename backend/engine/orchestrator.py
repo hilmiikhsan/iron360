@@ -292,6 +292,23 @@ def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
               "status": "done" if any(s.startswith("auth:") for s, _, _ in collected) else "skipped",
               "text": f"CIS evaluation — {len(cis_findings)} control failure(s)"})
 
+    # CPHunter CVE mass-detection (VA) — scope-enforced; results cross-checked by the AI below.
+    if profile != "quick" and not _stopped(stop_event):
+        from . import cphunter_bridge
+        if cphunter_bridge.available():
+            n += 1
+            emit({"type": "step", "n": n, "tool": "cphunter", "status": "running",
+                  "text": "CVE mass-detection (CPHunter) — all modules"})
+            cph = cphunter_bridge.detect(target, host, emit, stop_event)
+            cph_findings = [_cph_to_finding(c, host) for c in cph]
+            all_findings += cph_findings
+            collected.append(("cphunter", "cve mass-scan",
+                              "\n".join(f"[{c['state'].upper()}] {c['cve']} {c.get('version','')} "
+                                        f"{c.get('evidence','')[:160]}" for c in cph) or "(no CVE hits)"))
+            emit({"type": "step", "n": n, "tool": "cphunter", "status": "done",
+                  "text": f"CPHunter — {sum(1 for c in cph if c['state']=='vulnerable')} vulnerable, "
+                          f"{sum(1 for c in cph if c['state']=='inconclusive')} inconclusive"})
+
     # Merge + dedupe + parameter extraction + gf-pattern tagging (3 Bugs methodology)
     uniq_urls = sorted({u for u in url_lines if u.startswith("http")})
     uniq_subs = sorted(set(sub_lines))
@@ -390,6 +407,37 @@ def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
             challengeable = _verify_findings(target, challengeable, emit)
         all_findings = det + challengeable
 
+    # CPHunter proof-of-impact exploitation (PT phase only, approval-gated, safe PoC, scope-enforced).
+    if mode == "pentest" and not _stopped(stop_event):
+        from . import cphunter_bridge
+        if cphunter_bridge.available():
+            exploit_targets = [f for f in all_findings
+                               if f.get("_cph_state") == "vulnerable" and f.get("status") != "false_positive"]
+            exploited = []
+            for f in exploit_targets:
+                if _stopped(stop_event):
+                    break
+                if not _approve(f"exploit-{f['cve']}",
+                                f"Proof-of-impact exploit {f['cve']} on {host} (CPHunter safe PoC, read-only)"):
+                    continue
+                res = cphunter_bridge.exploit(target, f["cve"], host, emit, stop_event)
+                if res.get("ran"):
+                    f["evidence"] = (f.get("evidence", "") + "\n\n[EXPLOIT OUTPUT]\n" + (res.get("output") or ""))[:4000]
+                    if res.get("success"):
+                        f["status"] = "confirmed"
+                        f["confidence"] = max(int(f.get("confidence", 0) or 0), 95)
+                    exploited.append(f)
+            if exploited:
+                emit({"type": "reasoning", "text": "AI validating CPHunter exploit output as real proof-of-impact…"})
+                validated = _verify_findings(target, exploited, emit)
+                by_title = {v["title"]: v for v in validated}
+                for f in exploited:
+                    v = by_title.get(f["title"])
+                    if v:
+                        f["status"] = v.get("status", f["status"])
+                        f["confidence"] = int(v.get("confidence", f["confidence"]) or f["confidence"])
+                        f["description"] = v.get("description", f["description"])
+
     # OWASP Top 10 (2021) coverage matrix — what was checked + findings per category.
     matrix = _owasp_matrix(all_findings, mode, profile, has_auth)
     emit({"type": "intel", "kind": "owasp", "items": matrix})
@@ -433,6 +481,36 @@ def _owasp_matrix(findings: list[dict], mode: str, profile: str, has_auth: bool)
         found = sum(1 for f in findings if oid in (f.get("owasp", "") + " " + f.get("description", "")))
         out.append({"id": oid, "name": name, "method": m, "findings": found})
     return out
+
+
+def _cph_to_finding(c: dict, host: str) -> dict:
+    """Turn a CPHunter detection result into an Iron360 draft finding (AI cross-checks it later)."""
+    cve = c.get("cve", "")
+    if c.get("state") == "vulnerable":
+        ex = c.get("exploit_state")
+        ex_note = (" CPHunter safe-exploit confirmed impact." if ex is True
+                   else " Safe-exploit inconclusive." if ex is None else "")
+        return {
+            "title": f"{cve} — vulnerable component (CPHunter)", "severity": "high", "status": "likely",
+            "confidence": 72, "affected": f"{host}{(':' + str(c['port'])) if c.get('port') else ''}",
+            "cve": cve,
+            "description": f"CPHunter flagged {host} VULNERABLE to {cve}."
+                           + (f" Detected version: {c['version']}." if c.get("version") else "")
+                           + ex_note,
+            "evidence": (c.get("evidence", "") + ("\n" + c.get("exploit_evidence", "") if c.get("exploit_evidence") else "")).strip(),
+            "remediation": "Upgrade/patch the affected component to a fixed release; apply vendor advisory for this CVE.",
+            "fix_config": "", "fix_steps": "1. Confirm installed version. 2. Upgrade to the patched release. "
+                                           "3. Re-run detection to verify the CVE no longer matches.",
+            "sources": ["cphunter"], "_cph_state": "vulnerable",
+        }
+    return {
+        "title": f"{cve} — possible (unconfirmed version) (CPHunter)", "severity": "info", "status": "needs_review",
+        "confidence": 30, "affected": host, "cve": cve,
+        "description": f"CPHunter returned INCONCLUSIVE for {cve} on {host} — the component version could not be "
+                       "confirmed, so this is NOT asserted as vulnerable (anti-false-positive).",
+        "evidence": c.get("evidence", ""), "remediation": "Manually confirm the component version to decide.",
+        "fix_config": "", "fix_steps": "", "sources": ["cphunter"], "_cph_state": "inconclusive",
+    }
 
 
 def _ai_extract_findings(target: Target, collected: list[tuple[str, str, str]], emit: Emit) -> list[dict]:
