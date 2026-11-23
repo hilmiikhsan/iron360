@@ -1,0 +1,26 @@
+{
+  "name": "vapt-ai",
+  "version": "1.0.0",
+  "description": "AI-assisted Vulnerability Assessment & Penetration Testing console for RSA. This is the **VAPT AI** module (the first of several planned: Threat Intel, Dark Web Crawling, Domain Health, SIEM Log).",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hilmiikhsan/iron360.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/hilmiikhsan/iron360/issues"
+  },
+  "homepage": "https://github.com/hilmiikhsan/iron360#readme",
+  "devDependencies": {
+    "clean-css-cli": "^5.6.3",
+    "esbuild": "^0.28.2",
+    "javascript-obfuscator": "^5.10.1"
+  }
+}

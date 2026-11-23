@@ -102,13 +102,16 @@ def healthz() -> dict:
 
 
 # ---- Serve the SPA frontend ----
-if (FRONTEND_DIR / "assets").exists():
-    app.mount("/assets", StaticFiles(directory=FRONTEND_DIR / "assets"), name="assets")
+# Prefer dist/ (minified+obfuscated build) over raw assets/
+_ASSETS_DIR = FRONTEND_DIR / "dist" if (FRONTEND_DIR / "dist").exists() else FRONTEND_DIR / "assets"
+if _ASSETS_DIR.exists():
+    app.mount("/assets", StaticFiles(directory=_ASSETS_DIR), name="assets")
 
 
 @app.get("/")
 def index() -> FileResponse:
-    return FileResponse(FRONTEND_DIR / "index.html")
+    built_index = FRONTEND_DIR / "dist" / "index.html"
+    return FileResponse(built_index if built_index.exists() else FRONTEND_DIR / "index.html")
 
 
 @app.exception_handler(404)
