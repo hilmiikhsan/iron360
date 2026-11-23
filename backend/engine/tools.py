@@ -324,5 +324,38 @@ def _require_param_url(host: str, o: dict) -> str:
     return url
 
 
+def _cphunter_bin() -> str | None:
+    """Return cphunter.py path if CPHunter is installed."""
+    if _settings.cphunter_dir:
+        from pathlib import Path
+        p = Path(_settings.cphunter_dir) / "cphunter.py"
+        if p.is_file():
+            return str(p)
+    return None
+
+
+_CPH_MODULES = {
+    "java4shell":  ("CVE-2026-114938", "CVE-2026-114938 — OpenJDK AVX-512 Base64 heap overflow (critical). Targets Keycloak/Jenkins/Confluence/Spring/Tomcat/Elasticsearch."),
+    "nginx2root":  ("CVE-2026-123007", "CVE-2026-123007 — nginx HTTP/2 flow-control integer underflow → RCE (critical). Targets nginx 1.9.5–1.30.6 / 1.31.0–1.31.8 with h2."),
+    "sshole":      ("CVE-2026-123158", "CVE-2026-123158 — OpenSSH musl crypt() auth bypass (high). Targets Alpine/musl-based OpenSSH < 10.6p2."),
+}
+
+for _mod_id, (_cve_id, _mod_desc) in _CPH_MODULES.items():
+    _register(Tool(
+        name=f"cphunter_{_mod_id}",
+        binary=_settings.cphunter_python if _settings.cphunter_python else "python3",
+        category="exploit",
+        intensity="active",
+        description=f"CPHunter {_mod_desc} Option: port (target port).",
+        build=(lambda cve: lambda host, o: [
+            _settings.cphunter_python or "python3",
+            _cphunter_bin() or "cphunter.py",
+            host, "--scan", "--cve-vuln",
+            "--cve-filter", cve,
+            "--cve-vuln-timeout", str(_settings.cphunter_timeout),
+        ])(str(_cve_id)),
+    ))
+
+
 def installed_tools() -> dict[str, bool]:
     return {name: tool.installed for name, tool in REGISTRY.items()}

@@ -42,6 +42,10 @@ tool output in real-time.
 - Vulnerability scanning: nuclei, nmap NSE, nikto, sslscan.
 - Active testing: sqlmap (SQLi), dalfox/xsstrike (XSS), commix (command injection).
 - Content discovery: ffuf, gobuster, feroxbuster, dirsearch.
+- CVE-specific scanning via CPHunter modules:
+  * cphunter_java4shell — CVE-2026-114938: OpenJDK AVX-512 Base64 heap overflow (Java apps: Keycloak, Jenkins, Confluence, Spring Boot, Tomcat, Elasticsearch)
+  * cphunter_nginx2root — CVE-2026-123007: nginx HTTP/2 flow-control RCE (nginx 1.9.5–1.30.6 / 1.31.0–1.31.8 with h2 enabled)
+  * cphunter_sshole — CVE-2026-123158: OpenSSH musl crypt() auth bypass (Alpine/musl-based OpenSSH < 10.6p2)
 - Always validate findings — a single scanner hit is 'needs_review', not 'confirmed'.
 
 ## Target context
@@ -80,6 +84,8 @@ def _build_tool_defs() -> list[dict]:
             props["scheme"] = {
                 "type": "string", "description": "http or https", "enum": ["http", "https"],
             }
+        elif name.startswith("cphunter_"):
+            props["port"] = {"type": "string", "description": "Target port (e.g. '80', '443', '22')"}
 
         defs.append({
             "name": f"run_{name}",
