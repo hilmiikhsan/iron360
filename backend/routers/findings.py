@@ -32,7 +32,27 @@ def set_status(finding_id: int, body: FindingStatusUpdate, db: Session = Depends
     f.status = body.status
     db.commit()
     db.refresh(f)
-    # Human validation is the final gate — record who changed the verdict.
     record(db, actor=user.username, action="finding_status", target_value=f.affected,
            detail=f"finding_id={finding_id} -> {body.status}")
     return f
+
+
+@router.delete("/{finding_id}", status_code=204)
+def delete_finding(finding_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    f = db.get(Finding, finding_id)
+    if not f:
+        raise HTTPException(status_code=404, detail="Finding not found")
+    record(db, actor=user.username, action="finding_delete", target_value=f.affected,
+           detail=f"finding_id={finding_id} title={f.title}")
+    db.delete(f)
+    db.commit()
+
+
+@router.delete("", status_code=204)
+def delete_all_findings(target_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    count = db.query(Finding).filter(Finding.target_id == target_id).count()
+    if count == 0:
+        raise HTTPException(status_code=404, detail="No findings for this target")
+    db.query(Finding).filter(Finding.target_id == target_id).delete()
+    db.commit()
+    record(db, actor=user.username, action="findings_reset", detail=f"target_id={target_id} deleted={count}")

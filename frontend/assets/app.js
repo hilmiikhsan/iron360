@@ -17,19 +17,58 @@ const State = {
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-function toast(msg) {
+function toast(msg, type = "info") {
+  const icons = { info: "ℹ", success: "✓", error: "✗", warn: "⚠" };
   const t = document.createElement("div");
-  t.className = "toast";
-  t.textContent = msg;
+  t.className = `toast toast-${type}`;
+  t.innerHTML = `<span class="toast-icon">${icons[type] || icons.info}</span><span>${esc(msg)}</span>`;
   document.body.appendChild(t);
-  setTimeout(() => t.remove(), 2600);
+  requestAnimationFrame(() => t.classList.add("toast-show"));
+  setTimeout(() => { t.classList.remove("toast-show"); setTimeout(() => t.remove(), 300); }, 2800);
+}
+
+function showDialog(opts) {
+  return new Promise((resolve) => {
+    const bg = document.createElement("div");
+    bg.className = "dialog-bg";
+    const hasInput = opts.type === "prompt";
+    const isDanger = opts.danger;
+    bg.innerHTML = `
+      <div class="dialog">
+        <div class="dialog-icon-wrap ${isDanger ? "dialog-danger" : "dialog-normal"}">
+          ${isDanger ? '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>'
+            : '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 8v4m0 4h.01"/><circle cx="12" cy="12" r="10"/></svg>'}
+        </div>
+        <h3 class="dialog-title">${esc(opts.title || "Confirm")}</h3>
+        <p class="dialog-msg">${esc(opts.message || "")}</p>
+        ${hasInput ? `<input class="dialog-input" id="dlgInput" placeholder="${esc(opts.placeholder || "")}" value="${esc(opts.defaultValue || "")}" />` : ""}
+        <div class="dialog-actions">
+          <button class="dialog-btn dialog-cancel" id="dlgCancel">${esc(opts.cancelText || "Cancel")}</button>
+          <button class="dialog-btn ${isDanger ? "dialog-btn-danger" : "dialog-btn-primary"}" id="dlgOk">${esc(opts.okText || "OK")}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(bg);
+    requestAnimationFrame(() => bg.classList.add("dialog-show"));
+    const inp = bg.querySelector("#dlgInput");
+    if (inp) setTimeout(() => inp.focus(), 100);
+    const close = (val) => {
+      bg.classList.remove("dialog-show");
+      setTimeout(() => bg.remove(), 250);
+      resolve(val);
+    };
+    bg.querySelector("#dlgCancel").addEventListener("click", () => close(hasInput ? null : false));
+    bg.querySelector("#dlgOk").addEventListener("click", () => close(hasInput ? (inp ? inp.value : "") : true));
+    bg.addEventListener("click", (e) => { if (e.target === bg) close(hasInput ? null : false); });
+    if (inp) inp.addEventListener("keydown", (e) => { if (e.key === "Enter") close(inp.value); });
+    bg.addEventListener("keydown", (e) => { if (e.key === "Escape") close(hasInput ? null : false); });
+  });
 }
 
 async function api(path, opts = {}) {
   const headers = Object.assign({ "Content-Type": "application/json" }, opts.headers || {});
   if (State.token) headers["Authorization"] = "Bearer " + State.token;
   const res = await fetch(path, Object.assign({}, opts, { headers }));
-  if (res.status === 401) { logout(); throw new Error("Session expired"); }
+  if (res.status === 401) { logout(true); throw new Error("Session expired"); }
   if (!res.ok) {
     let detail = res.statusText;
     try { detail = (await res.json()).detail || detail; } catch (_) {}
@@ -39,10 +78,22 @@ async function api(path, opts = {}) {
   return res.json();
 }
 
-function logout() {
+function logout(force) {
+  if (force) {
+    _doLogout();
+    return;
+  }
+  showDialog({ title: "Logout", message: "Keluar dari Iron360? Session aktif akan diakhiri.", okText: "Logout", cancelText: "Cancel", danger: true }).then((yes) => {
+    if (yes) _doLogout();
+  });
+}
+function _doLogout() {
+  if (State.token) {
+    fetch("/api/auth/logout", { method: "POST", headers: { "Authorization": "Bearer " + State.token, "Content-Type": "application/json" } }).catch(() => {});
+  }
   State.token = null; State.user = null;
   localStorage.removeItem("iron360_token");
-  if (State.ws) { try { State.ws.close(); } catch (_) {} }
+  if (State.ws) { try { State.ws.close(); } catch (_) {} State.ws = null; }
   renderLogin();
 }
 
@@ -109,6 +160,8 @@ const NAV = [
   { sep: "Workspace" },
   { k: "targets", ico: "◎", label: "Targets & Scope" },
   { k: "knowledge", ico: "✦", label: "Knowledge Base" },
+  { k: "schedules", ico: "⏱", label: "Scheduled Scans" },
+  { k: "trending", ico: "▧", label: "Vuln Trending" },
   { k: "audit", ico: "▤", label: "Audit Log" },
   { k: "settings", ico: "⚙", label: "Settings" },
 ];
@@ -143,7 +196,7 @@ function renderShell() {
     <div class="drawer" id="drawer"></div>
     <div class="modal-bg" id="modalBg"></div>`;
 
-  $("#logoutBtn").addEventListener("click", logout);
+  $("#logoutBtn").addEventListener("click", () => logout());
   $("#drawerBg").addEventListener("click", closeDrawer);
   document.querySelectorAll("[data-nav]").forEach((a) => a.addEventListener("click", () => setView(a.dataset.nav)));
   renderTargetSwitch();
@@ -197,19 +250,19 @@ function toggleTargetMenu() {
 }
 
 /* ----------------------------- Router ----------------------------- */
-const TITLES = { dashboard: "Dashboard", pentest: "AI Pentest Console", findings: "Findings", reports: "Reports", "domain-health": "Domain Health", "threat-intel": "Threat Intelligence", "dark-web": "Dark Web Crawling", "siem-log": "SIEM Log", targets: "Targets & Scope", knowledge: "Knowledge Base", audit: "Audit Log", settings: "Settings" };
+const TITLES = { dashboard: "Dashboard", pentest: "AI Pentest Console", findings: "Findings", reports: "Reports", "domain-health": "Domain Health", "threat-intel": "Threat Intelligence", "dark-web": "Dark Web Crawling", "siem-log": "SIEM Log", targets: "Targets & Scope", knowledge: "Knowledge Base", schedules: "Scheduled Scans", trending: "Vulnerability Trending", audit: "Audit Log", settings: "Settings" };
 
 function setView(view) {
   State.view = view;
-  // Close any active WebSocket when navigating away from pentest
-  if (State.ws) { try { State.ws.close(); } catch (_) {} State.ws = null; }
+  // Don't close WebSocket on navigation — let scans run in background.
+  // WS is only closed when explicitly starting a new scan or switching modes.
   document.querySelectorAll("[data-nav]").forEach((a) => a.classList.toggle("active", a.dataset.nav === view));
   $("#viewTitle").textContent = TITLES[view] || "";
   const views = {
     dashboard: viewDashboard, pentest: viewPentest, findings: viewFindings, reports: viewReports,
     "domain-health": viewDomainHealth, "threat-intel": () => viewModule("threat-intel"),
     "dark-web": () => viewModule("dark-web"), "siem-log": () => viewModule("siem-log"),
-    targets: viewTargets, knowledge: viewKnowledge, audit: viewAudit, settings: viewSettings,
+    targets: viewTargets, knowledge: viewKnowledge, schedules: viewSchedules, trending: viewTrending, audit: viewAudit, settings: viewSettings,
   };
   (views[view] || viewDashboard)();
 }
@@ -332,19 +385,20 @@ function renderTargetsTable() {
 async function toggleAuth(id) {
   const t = State.targets.find((x) => x.id === id);
   if (!t.authorized) {
-    const ref = prompt("Authorization reference (SOW / PKS / NDA id) — required to mark in-scope:");
+    const ref = await showDialog({ type: "prompt", title: "Authorization Reference", message: "Masukkan referensi otorisasi (SOW / PKS / NDA id) untuk menandai target in-scope.", placeholder: "SOW-2026-014", okText: "Authorize" });
     if (ref === null) return;
     await api(`/api/targets/${id}`, { method: "PATCH", body: JSON.stringify({ authorized: true, authorization_ref: ref }) });
   } else {
     await api(`/api/targets/${id}`, { method: "PATCH", body: JSON.stringify({ authorized: false }) });
   }
-  await loadTargets(); renderTargetsTable(); renderTargetSwitch(); toast("Authorization updated");
+  await loadTargets(); renderTargetsTable(); renderTargetSwitch(); toast("Authorization updated", "success");
 }
 async function delTarget(id) {
-  if (!confirm("Delete this target and all its scans/findings?")) return;
+  const yes = await showDialog({ title: "Delete Target", message: "Hapus target ini beserta semua scan dan findings yang terkait? Aksi ini tidak dapat dibatalkan.", okText: "Delete", cancelText: "Cancel", danger: true });
+  if (!yes) return;
   await api(`/api/targets/${id}`, { method: "DELETE" });
   if (State.currentTargetId === id) State.currentTargetId = null;
-  await loadTargets(); renderTargetsTable(); renderTargetSwitch(); toast("Target deleted");
+  await loadTargets(); renderTargetsTable(); renderTargetSwitch(); toast("Target deleted", "success");
 }
 
 function openTargetModal() {
@@ -398,7 +452,7 @@ async function saveTarget() {
     localStorage.setItem("iron360_target", t.id);
     await loadTargets(); renderTargetSwitch();
     if (State.view === "targets") renderTargetsTable(); else setView(State.view);
-    toast("Target created");
+    toast("Target created", "success");
   } catch (e) { $("#mErr").textContent = e.message; }
 }
 
@@ -418,20 +472,23 @@ function viewPentest() {
     </div>
     <div id="modeContent"></div>`;
 
-  let mode = "pentest";
-  $("#modeSeg").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
-    mode = b.dataset.mode;
-    $("#modeSeg").querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
-    renderModeContent(t, mode);
-  }));
+  let mode = State.activeMode || "pentest";
+  $("#modeSeg").querySelectorAll("button").forEach((b) => {
+    b.classList.toggle("on", b.dataset.mode === mode);
+    b.addEventListener("click", () => {
+      mode = b.dataset.mode;
+      $("#modeSeg").querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
+      renderModeContent(t, mode);
+    });
+  });
   renderModeContent(t, mode);
 }
 
 function renderModeContent(t, mode) {
   const mc = $("#modeContent");
   if (!mc) return;
-  // Disconnect any active WebSocket before switching modes
-  if (State.ws) { try { State.ws.close(); } catch (_) {} State.ws = null; }
+  // Only close WS if actually switching to a different mode
+  if (mode !== State.activeMode && State.ws) { try { State.ws.close(); } catch (_) {} State.ws = null; }
   _currentToolBlock = null;
   State.activeMode = mode;
   if (mode === "va") {
@@ -496,7 +553,7 @@ function renderPentestMode(t, mc) {
         <div class="agent-status-line" id="agentStatus"></div>
         <div class="agent-input-row">
           <textarea id="chatInput" placeholder="What should I do?" rows="1"></textarea>
-          <button class="btn sm" id="chatSendBtn">↵</button>
+          <button class="btn sm" id="chatSendBtn" disabled>↵</button>
           <button class="btn danger sm" id="chatStopBtn" style="display:none">■ Stop</button>
         </div>
       </div>
@@ -506,10 +563,11 @@ function renderPentestMode(t, mc) {
   const sendBtn = $("#chatSendBtn");
   const stopBtn = $("#chatStopBtn");
 
-  // Auto-resize textarea
+  // Auto-resize textarea + toggle send button
   input.addEventListener("input", () => {
     input.style.height = "auto";
     input.style.height = Math.min(input.scrollHeight, 120) + "px";
+    sendBtn.disabled = !input.value.trim();
   });
 
   // Example chips
@@ -520,7 +578,7 @@ function renderPentestMode(t, mc) {
   async function sendMessage() {
     const msg = input.value.trim();
     if (!msg) return;
-    if (!t.authorized) { toast("Target not authorized"); return; }
+    if (!t.authorized) { toast("Target not authorized", "warn"); return; }
     input.value = ""; input.style.height = "auto";
     input.disabled = true;
     sendBtn.disabled = true;
@@ -538,14 +596,14 @@ function renderPentestMode(t, mc) {
         try { localStorage.setItem(`iron360_active_scan_${t.id}`, scan.id); } catch (_) {}
         openScanStream(scan.id);
         await new Promise((r) => setTimeout(r, 300));
-      } catch (e) { toast(e.message); input.disabled = false; sendBtn.disabled = false; stopBtn.style.display = "none"; return; }
+      } catch (e) { toast(e.message); input.disabled = false; sendBtn.disabled = !input.value.trim(); stopBtn.style.display = "none"; return; }
     }
 
     try {
       await api(`/api/scans/${State.scan.id}/chat`, { method: "POST", body: JSON.stringify({ message: msg }) });
     } catch (e) {
       toast(e.message);
-      input.disabled = false; sendBtn.disabled = false;
+      input.disabled = false; sendBtn.disabled = !input.value.trim();
     }
   }
 
@@ -560,10 +618,21 @@ function renderPentestMode(t, mc) {
 async function resumePentestIfActive(t) {
   let savedId;
   try { savedId = localStorage.getItem(`iron360_active_scan_${t.id}`); } catch (_) {}
+
+  if (!savedId) {
+    try {
+      const scans = await api(`/api/scans?target_id=${t.id}`);
+      const lastPT = scans.find((s) => s.mode === "pentest");
+      if (lastPT) savedId = lastPT.id;
+    } catch (_) {}
+  }
   if (!savedId) return;
+
   try {
     const scan = await api(`/api/scans/${savedId}`);
-    if (scan.mode === "pentest" && (scan.status === "chat_active" || scan.status === "running" || scan.status === "queued")) {
+    if (scan.mode !== "pentest") return;
+
+    if (scan.status === "chat_active" || scan.status === "running" || scan.status === "queued") {
       State.scan = scan;
       const stopBtn = $("#chatStopBtn");
       if (stopBtn) stopBtn.style.display = "";
@@ -571,12 +640,56 @@ async function resumePentestIfActive(t) {
       if (wel) wel.style.display = "none";
       agentAppend("system", "Reconnected to session #" + scan.id);
       openScanStream(scan.id);
-    } else {
-      try { localStorage.removeItem(`iron360_active_scan_${t.id}`); } catch (_) {}
+    } else if (scan.status === "done" || scan.status === "stopped" || scan.status === "failed") {
+      State.scan = scan;
+      const wel = document.querySelector(".agent-welcome");
+      if (wel) wel.style.display = "none";
+      _replayPentestTimeline(scan);
     }
-  } catch (_) {
-    try { localStorage.removeItem(`iron360_active_scan_${t.id}`); } catch (_) {}
+  } catch (_) {}
+}
+
+function _replayPentestTimeline(scan) {
+  if (!scan.timeline || !scan.timeline.length) return;
+  // During replay, limit log lines per tool to avoid DOM overload
+  let logCount = 0;
+  const LOG_LIMIT = 30;
+  for (const e of scan.timeline) {
+    switch (e.type) {
+      case "note": agentAppend("system", e.text); break;
+      case "chat_user": agentAppend("user", e.text); break;
+      case "agent_text": agentAppend("text", e.text); break;
+      case "agent_thinking_text":
+        if (e.text && e.text.length > 0) agentAppend("thinking_text", e.text.length > 300 ? e.text.slice(0, 300) + "…" : e.text);
+        break;
+      case "agent_tool_start":
+        logCount = 0;
+        agentAppend("tool_start", "", { tool: e.tool, host: e.host });
+        break;
+      case "exec":
+        if (logCount > LOG_LIMIT && _currentToolBlock) {
+          agentAppend("tool_line", `… ${logCount - LOG_LIMIT} more lines (collapsed)`);
+        }
+        agentAppend("tool_done", "", { ok: e.ok, exit_code: e.exit_code, duration_s: e.duration_s, denied_reason: e.denied_reason });
+        logCount = 0;
+        break;
+      case "log":
+        logCount++;
+        if (logCount <= LOG_LIMIT) agentAppend("tool_line", e.line || e.text || "");
+        break;
+      case "finding":
+        if (e.finding) agentAppend("finding", e.finding.title, { severity: e.finding.severity, title: e.finding.title });
+        break;
+      case "reasoning": agentAppend("system", e.text); break;
+      case "finish": agentAppend("system", e.text); break;
+      case "agent_status": break;
+      case "agent_thinking": break;
+      case "error": agentAppend("error", e.text); break;
+    }
   }
+  // Scroll to bottom after replay
+  const stream = $("#agentStream");
+  if (stream) stream.scrollTop = stream.scrollHeight;
 }
 
 // ---- Agent stream rendering (Claude-Code style) ----
@@ -598,9 +711,26 @@ function agentAppend(type, content, meta) {
   } else if (type === "text") {
     el.innerHTML = formatAgentMarkdown(content);
   } else if (type === "tool_start") {
-    const toolName = meta?.tool || "";
+    const toolName = meta?.tool || "tool";
+    const uid = "agTool_" + Date.now();
     el.className = "ag-block ag-tool";
-    el.innerHTML = `<div class="ag-tool-head"><span class="ag-tool-icon">⚡</span> <span class="ag-tool-name">${esc(toolName)}</span> <span class="ag-tool-host">${esc(meta?.host || "")}</span><span class="ag-tool-spinner">●</span></div><div class="ag-tool-output" id="agToolOut_${Date.now()}"></div>`;
+    el.innerHTML = `
+      <div class="ag-tool-head" aria-expanded="false" data-toggle="${uid}">
+        <span class="ag-tool-icon running">●</span>
+        <span class="ag-tool-name">${esc(toolName)}</span>
+        <span class="ag-tool-host">${esc(meta?.host || "")}</span>
+        <span class="ag-tool-meta"><span class="ag-tool-status">running…</span><span class="ag-tool-chevron">▶</span></span>
+      </div>
+      <div class="ag-tool-body collapsed" id="${uid}">
+        <div class="ag-tool-output"></div>
+      </div>`;
+    const head = el.querySelector(".ag-tool-head");
+    const body = el.querySelector(".ag-tool-body");
+    head.addEventListener("click", () => {
+      const exp = head.getAttribute("aria-expanded") === "true";
+      head.setAttribute("aria-expanded", !exp);
+      body.classList.toggle("collapsed", exp);
+    });
     _currentToolBlock = el.querySelector(".ag-tool-output");
   } else if (type === "tool_line") {
     if (_currentToolBlock) {
@@ -609,6 +739,13 @@ function agentAppend(type, content, meta) {
       line.textContent = content;
       _currentToolBlock.appendChild(line);
       _currentToolBlock.scrollTop = _currentToolBlock.scrollHeight;
+      // Auto-expand when output starts flowing
+      const body = _currentToolBlock.closest(".ag-tool-body");
+      if (body && body.classList.contains("collapsed")) {
+        body.classList.remove("collapsed");
+        const head = body.previousElementSibling;
+        if (head) head.setAttribute("aria-expanded", "true");
+      }
       stream.scrollTop = stream.scrollHeight;
       return null;
     }
@@ -617,16 +754,22 @@ function agentAppend(type, content, meta) {
     if (_currentToolBlock) {
       const parent = _currentToolBlock.closest(".ag-tool");
       if (parent) {
-        const spinner = parent.querySelector(".ag-tool-spinner");
-        if (spinner) {
-          spinner.className = "ag-tool-done-icon";
-          if (meta?.ok) { spinner.textContent = "✓"; spinner.style.color = "var(--ok)"; }
-          else { spinner.textContent = "✗"; spinner.style.color = "var(--critical)"; }
+        const icon = parent.querySelector(".ag-tool-icon");
+        const statusEl = parent.querySelector(".ag-tool-status");
+        if (meta?.ok) {
+          if (icon) { icon.textContent = "✓"; icon.className = "ag-tool-icon ok"; }
+          if (statusEl) statusEl.textContent = `exit ${meta.exit_code} · ${meta.duration_s}s`;
+        } else {
+          if (icon) { icon.textContent = "✗"; icon.className = "ag-tool-icon fail"; }
+          if (statusEl) { statusEl.textContent = meta.denied_reason || "failed"; statusEl.style.color = "var(--critical)"; }
         }
-        const info = document.createElement("div");
-        info.className = "ag-tool-info";
-        info.textContent = meta?.ok ? `exit ${meta.exit_code} · ${meta.duration_s}s` : (meta.denied_reason || "failed");
-        parent.appendChild(info);
+        // Collapse successful tool output after completion
+        const body = parent.querySelector(".ag-tool-body");
+        const head = parent.querySelector(".ag-tool-head");
+        if (body && meta?.ok) {
+          body.classList.add("collapsed");
+          if (head) head.setAttribute("aria-expanded", "false");
+        }
       }
     }
     _currentToolBlock = null;
@@ -664,16 +807,18 @@ function formatAgentMarkdown(text) {
 }
 
 async function startScan(t, mode, autonomy, profile) {
-  if (!t.authorized) { toast("Target not authorized"); return; }
+  if (!t.authorized) { toast("Target not authorized", "warn"); return; }
+  if (State.scanning) { toast("Scan already running", "warn"); return; }
   $("#timeline").innerHTML = ""; $("#terminal").innerHTML = "";
   $("#startBtn").disabled = true; $("#stopBtn").disabled = false;
+  State.scanning = true;
   try {
     const scan = await api("/api/scans", { method: "POST", body: JSON.stringify({ target_id: t.id, mode, autonomy, profile: profile || "full" }) });
     State.scan = scan;
     // Persist so browser refresh can reconnect.
     try { localStorage.setItem(`iron360_active_scan_${t.id}`, scan.id); } catch (_) {}
     openScanStream(scan.id);
-  } catch (e) { toast(e.message); $("#startBtn").disabled = false; $("#stopBtn").disabled = true; }
+  } catch (e) { toast(e.message); $("#startBtn").disabled = false; $("#stopBtn").disabled = true; State.scanning = false; }
 }
 
 /**
@@ -681,24 +826,70 @@ async function startScan(t, mode, autonomy, profile) {
  * reconnect its WebSocket so the user doesn't lose context on a refresh.
  */
 async function resumeIfRunning(t) {
+  // First check localStorage for a known scan
   let savedId;
   try { savedId = localStorage.getItem(`iron360_active_scan_${t.id}`); } catch (_) {}
+
+  // If no saved scan, try loading the most recent VA scan for this target
+  if (!savedId) {
+    try {
+      const scans = await api(`/api/scans?target_id=${t.id}`);
+      const lastVA = scans.find((s) => s.mode === "va");
+      if (lastVA) savedId = lastVA.id;
+    } catch (_) {}
+  }
   if (!savedId) return;
+
   try {
     const scan = await api(`/api/scans/${savedId}`);
-    // Only reconnect VA scans (running/queued), not pentest chat sessions
-    if ((scan.status === "running" || scan.status === "queued") && scan.mode === "va") {
+    if (scan.mode !== "va") return;
+
+    if (scan.status === "running" || scan.status === "queued") {
       State.scan = scan;
+      State.scanning = true;
       const sb = $("#startBtn"), stb = $("#stopBtn");
       if (sb) sb.disabled = true;
       if (stb) stb.disabled = false;
       addTimeline("note", `↩ Scan #${scan.id} still running — reconnecting stream…`);
       openScanStream(scan.id);
-    } else if (scan.status === "done" || scan.status === "stopped" || scan.status === "failed") {
-      try { localStorage.removeItem(`iron360_active_scan_${t.id}`); } catch (_) {}
+    } else if (scan.status === "done" || scan.status === "stopped") {
+      // Completed scan — replay its timeline so user sees results
+      State.scan = scan;
+      State.scanning = false;
+      _replayTimeline(scan);
     }
-  } catch (_) {
-    try { localStorage.removeItem(`iron360_active_scan_${t.id}`); } catch (_) {}
+  } catch (_) {}
+}
+
+function _replayTimeline(scan) {
+  if (!scan.timeline || !scan.timeline.length) return;
+  for (const e of scan.timeline) {
+    switch (e.type) {
+      case "note": addTimeline("note", e.text); break;
+      case "plan": renderPlan(e.steps || []); break;
+      case "step": updateStep(e.n, e.status, e.text); break;
+      case "reasoning": addTimeline("reasoning", e.text); break;
+      case "log": addTerm("out", e.line || e.text || ""); break;
+      case "exec":
+        addTerm("cmd", "$ " + e.command);
+        if (!e.ok) addTerm("denied", "✗ " + (e.denied_reason || "failed"));
+        else addTerm("ok", `✓ exit ${e.exit_code} · ${e.duration_s}s`);
+        break;
+      case "finding":
+        if (e.finding) addTimeline("finding", `${(e.finding.status || "").toUpperCase()} · ${e.finding.severity} · ${e.finding.title} (conf ${e.finding.confidence}%)`);
+        break;
+      case "intel": {
+        const items = e.items || [];
+        if (e.kind === "exploit-db") addTimeline("reasoning", `Exploit-DB: ${items.length} public exploit(s) matched`);
+        else if (e.kind === "owasp") {
+          const checked = items.filter((m) => m.method !== "manual only").length;
+          addTimeline("reasoning", `OWASP Top 10: ${checked}/10 categories checked`);
+        }
+        break;
+      }
+      case "finish": addTimeline("finish", e.text); break;
+      case "done": break;
+    }
   }
 }
 
@@ -709,18 +900,29 @@ function openScanStream(scanId) {
   State.ws = ws;
   ws.onmessage = (ev) => handleEvent(JSON.parse(ev.data));
   ws.onclose = () => {
-    // Re-enable controls for whichever mode is active
+    State.ws = null;
+    if (State.scanning) return;
+    // Remove thinking indicator on disconnect
+    const th = document.getElementById("agThinking"); if (th) th.remove();
     if (State.activeMode === "pentest") {
-      const inp = $("#chatInput"); if (inp) inp.disabled = false;
-      const sb = $("#chatSendBtn"); if (sb) sb.disabled = false;
-      const stopB = $("#chatStopBtn"); if (stopB) stopB.style.display = "none";
       setAgentStatusLine("");
+      _resetPentestInput();
     } else {
       const sb = $("#startBtn"); if (sb) sb.disabled = false;
       const stb = $("#stopBtn"); if (stb) stb.disabled = true;
     }
   };
-  ws.onerror = () => toast("Stream error");
+  ws.onerror = () => {
+    // Remove thinking indicator on error
+    const th = document.getElementById("agThinking"); if (th) th.remove();
+    if (State.activeMode === "pentest") {
+      agentAppend("error", "Connection lost — check network or retry.");
+      setAgentStatusLine("");
+      _resetPentestInput();
+      if (State.scan) State.scan.status = "failed";
+    }
+    toast("Stream error", "error");
+  };
 }
 
 const STEP_ICON = { pending: "○", running: "◍", done: "✓", failed: "✗", skipped: "⊘" };
@@ -832,10 +1034,10 @@ function handleEvent(e) {
     }
     case "finish": addTimeline("finish", e.text); break;
     case "done":
+      State.scanning = false;
       if ($("#startBtn")) $("#startBtn").disabled = false;
       if ($("#stopBtn")) $("#stopBtn").disabled = true;
-      if (State.currentTargetId) { try { localStorage.removeItem(`iron360_active_scan_${State.currentTargetId}`); } catch (_) {} }
-      toast("Assessment complete");
+      toast("Assessment complete", "success");
       break;
 
     // ---- Pentest agent events (Claude Code style stream) ----
@@ -849,6 +1051,8 @@ function handleEvent(e) {
       if (old) old.remove();
       agentAppend("thinking");
       setAgentStatusLine("thinking…");
+      // Ensure Stop button is visible during thinking
+      { const stopB = $("#chatStopBtn"); if (stopB) stopB.style.display = ""; }
       break;
     }
     case "agent_thinking_text": {
@@ -864,25 +1068,34 @@ function handleEvent(e) {
       break;
     case "agent_tool_start":
       agentAppend("tool_start", "", { tool: e.tool, host: e.host });
+      setAgentStatusLine(`running ${e.tool || "tool"}…`);
+      { const stopB = $("#chatStopBtn"); if (stopB) stopB.style.display = ""; }
       break;
     case "agent_status":
       setAgentStatusLine(e.status);
       break;
     case "chat_turn_done": {
       setAgentStatusLine("");
-      const inp = $("#chatInput"); if (inp) inp.disabled = false;
-      const sb = $("#chatSendBtn"); if (sb) sb.disabled = false;
-      const stopB = $("#chatStopBtn"); if (stopB) stopB.style.display = "none";
+      _resetPentestInput();
       break;
     }
     case "error":
       addTimeline("error", e.text);
+      // Remove any thinking indicator
+      { const th = document.getElementById("agThinking"); if (th) th.remove(); }
       agentAppend("error", e.text);
       setAgentStatusLine("");
-      { const inp = $("#chatInput"); if (inp) inp.disabled = false; }
-      { const sb = $("#chatSendBtn"); if (sb) sb.disabled = false; }
+      _resetPentestInput();
+      // Mark scan as failed so next message creates a fresh session
+      if (State.scan) State.scan.status = "failed";
       break;
   }
+}
+
+function _resetPentestInput() {
+  const inp = $("#chatInput"); if (inp) { inp.disabled = false; inp.focus(); }
+  const sb = $("#chatSendBtn"); if (sb) sb.disabled = !(inp && inp.value.trim());
+  const stopB = $("#chatStopBtn"); if (stopB) stopB.style.display = "none";
 }
 
 function setAgentStatusLine(status) {
@@ -894,6 +1107,7 @@ async function stopScan() {
   if (!State.scan) return;
   const sid = State.scan.id;
 
+  State.scanning = false;
   if (State.activeMode === "pentest") {
     const chatStopBtn = $("#chatStopBtn"); if (chatStopBtn) chatStopBtn.style.display = "none";
     agentAppend("system", "Stopping agent…");
@@ -928,15 +1142,48 @@ async function viewFindings() {
   const findings = await api("/api/findings?target_id=" + t.id);
   State.findings = findings;
   if (!findings.length) { c.innerHTML = `<div class="empty">No findings yet for ${esc(t.value)}. Run an AI pentest.</div>`; return; }
-  c.innerHTML = `<div class="card"><table><thead><tr><th>Severity</th><th>Finding</th><th>Status</th><th>Confidence</th><th>Sources</th></tr></thead><tbody>
-    ${findings.map((f) => `<tr class="clickable" data-f="${f.id}">
+  const realFindings = findings.filter((f) => f.status !== "false_positive");
+  const fpFindings = findings.filter((f) => f.status === "false_positive");
+  c.innerHTML = `
+    <div class="row spread" style="margin-bottom:14px">
+      <span class="muted">${findings.length} finding(s)${fpFindings.length ? ` · <span id="toggleFP" style="cursor:pointer;text-decoration:underline">${fpFindings.length} false positive hidden</span>` : ""}</span>
+      <button class="btn danger sm" id="resetFindings">Reset all findings</button>
+    </div>
+    <div class="card"><table><thead><tr><th>Severity</th><th>Finding</th><th>CVSS</th><th>Status</th><th>Confidence</th><th>Sources</th><th></th></tr></thead><tbody>
+    ${findings.map((f) => `<tr class="clickable ${f.status === "false_positive" ? "fp-row" : ""}" data-f="${f.id}" ${f.status === "false_positive" ? 'style="display:none"' : ""}>
       <td><span class="pill ${f.severity}">${f.severity}</span></td>
-      <td><b>${esc(f.title)}</b> ${f.cve ? `<span class="tag" style="color:var(--accent)">${esc(f.cve)}</span>` : ""}<br><small class="muted">${esc(f.affected || "")}</small></td>
+      <td><b>${esc(f.title)}</b> ${f.cve ? `<span class="tag" style="color:var(--accent)">${esc(f.cve)}</span>` : ""}${f.cwe ? ` <span class="tag">${esc(f.cwe)}</span>` : ""}<br><small class="muted">${esc(f.affected || "")}</small></td>
+      <td>${f.cvss_score ? `<b style="color:${cvssColor(f.cvss_score)}">${f.cvss_score}</b>` : '<span class="muted">—</span>'}</td>
       <td><span class="pill ${f.status}">${f.status.replace("_", " ")}</span></td>
-      <td>${f.confidence}%</td>
-      <td><small class="muted">${(f.sources || []).map(esc).join(", ")}</small></td></tr>`).join("")}
+      <td>${_confLabel(f.confidence)}</td>
+      <td><small class="muted">${(f.sources || []).map(esc).join(", ")}</small></td>
+      <td><button class="btn danger sm del-finding" data-del="${f.id}" style="padding:3px 8px;font-size:11px">✗</button></td></tr>`).join("")}
   </tbody></table></div>`;
-  c.querySelectorAll("[data-f]").forEach((r) => r.addEventListener("click", () => openFinding(Number(r.dataset.f))));
+  c.querySelectorAll("[data-f]").forEach((r) => r.addEventListener("click", (e) => {
+    if (e.target.closest(".del-finding")) return;
+    openFinding(Number(r.dataset.f));
+  }));
+  c.querySelectorAll(".del-finding").forEach((b) => b.addEventListener("click", (e) => {
+    e.stopPropagation();
+    deleteFinding(Number(b.dataset.del));
+  }));
+  $("#resetFindings").addEventListener("click", () => resetAllFindings(t.id));
+  const fpToggle = $("#toggleFP");
+  if (fpToggle) {
+    let fpVisible = false;
+    fpToggle.addEventListener("click", () => {
+      fpVisible = !fpVisible;
+      c.querySelectorAll(".fp-row").forEach((r) => r.style.display = fpVisible ? "" : "none");
+      fpToggle.textContent = fpVisible ? `hide ${fpFindings.length} false positive` : `${fpFindings.length} false positive hidden`;
+    });
+  }
+}
+
+function _confLabel(pct) {
+  if (pct >= 80) return `<span style="color:var(--ok)">${pct}%</span>`;
+  if (pct >= 50) return `<span style="color:var(--warn)">${pct}%</span>`;
+  if (pct >= 20) return `<span style="color:var(--muted)">${pct}%</span>`;
+  return `<span style="color:var(--critical);opacity:0.7">${pct}% <small>unverified</small></span>`;
 }
 
 function openFinding(id) {
@@ -945,36 +1192,80 @@ function openFinding(id) {
   d.innerHTML = `
     <div class="row spread"><span class="pill ${f.severity}">${f.severity}</span><button class="btn ghost sm" id="closeDrawer">Close</button></div>
     <h2>${esc(f.title)}</h2>
-    <div class="row"><span class="pill ${f.status}">${f.status.replace("_", " ")}</span><span class="muted">confidence ${f.confidence}%</span></div>
+    <div class="row"><span class="pill ${f.status}">${f.status.replace("_", " ")}</span><span class="muted">confidence ${f.confidence}%</span>
+      ${f.cvss_score ? `<span style="font-weight:700;color:${cvssColor(f.cvss_score)}">CVSS ${f.cvss_score}</span>` : ""}</div>
+    ${f.cvss_vector ? kv("CVSS Vector", f.cvss_vector) : ""}
     ${f.cve ? `<div class="kv"><div class="k">CVE / Exploit</div><div class="v">
         <a href="https://nvd.nist.gov/vuln/detail/${esc(f.cve)}" target="_blank" rel="noopener">${esc(f.cve)} (NVD)</a>
         &nbsp;·&nbsp;<a href="https://www.exploit-db.com/search?cve=${esc(f.cve)}" target="_blank" rel="noopener">Exploit-DB</a>
       </div></div>` : ""}
+    ${f.cwe ? kv("CWE", f.cwe) : ""}
     ${kv("Affected", f.affected || "—")}
-    ${kv("Description", esc(f.description || "—"))}
+    <div class="kv"><div class="k">Description</div><div class="v">${fmtText(f.description || "—")}</div></div>
     <div class="kv"><div class="k">Evidence / PoC</div><div class="codeblock">${esc(f.evidence || "(none)")}</div></div>
-    ${kv("Remediation", esc(f.remediation || "—"))}
+    <div class="kv"><div class="k">Remediation</div><div class="v">${fmtText(f.remediation || "—")}</div></div>
     ${f.fix_config ? `<div class="kv"><div class="k" style="color:var(--confirmed)">Config fix (siap pakai)</div><div class="codeblock">${esc(f.fix_config)}</div></div>` : ""}
-    ${f.fix_steps ? `<div class="kv"><div class="k" style="color:var(--confirmed)">Langkah apply &amp; verify</div><div class="codeblock">${esc(f.fix_steps)}</div></div>` : ""}
+    ${f.fix_steps ? `<div class="kv"><div class="k" style="color:var(--confirmed)">Langkah apply &amp; verify</div><div class="codeblock" style="white-space:pre-wrap">${fmtText(f.fix_steps)}</div></div>` : ""}
     ${kv("Corroborating sources", (f.sources || []).join(", ") || "—")}
+    ${(f.references && f.references.length) ? `<div class="kv"><div class="k">References</div><div class="v">${f.references.map(r => `<a href="${esc(r)}" target="_blank" rel="noopener" style="display:block;font-size:12px;margin:2px 0">${esc(r)}</a>`).join("")}</div></div>` : ""}
     <div class="section-title"><h3>Human validation (final gate)</h3></div>
     <div class="row">
       <button class="btn sm" data-set="confirmed">Confirm</button>
       <button class="btn ghost sm" data-set="likely">Likely</button>
       <button class="btn ghost sm" data-set="needs_review">Needs review</button>
       <button class="btn danger sm" data-set="false_positive">False positive</button>
+    </div>
+    <div style="margin-top:24px;padding-top:16px;border-top:1px solid var(--border)">
+      <button class="btn danger sm" id="drawerDelFinding">Delete this finding</button>
     </div>`;
   $("#drawerBg").classList.add("open"); d.classList.add("open");
   $("#closeDrawer").addEventListener("click", closeDrawer);
+  $("#drawerDelFinding").addEventListener("click", () => deleteFinding(id));
   d.querySelectorAll("[data-set]").forEach((b) => b.addEventListener("click", () => setFindingStatus(id, b.dataset.set)));
 }
+function cvssColor(score) {
+  if (score >= 9.0) return "#dc2626";
+  if (score >= 7.0) return "#ea580c";
+  if (score >= 4.0) return "#d97706";
+  if (score >= 0.1) return "#2563eb";
+  return "#64748b";
+}
 function kv(k, v) { return `<div class="kv"><div class="k">${esc(k)}</div><div class="v">${v}</div></div>`; }
+function fmtText(raw) {
+  if (!raw || raw === "—") return "—";
+  let s = esc(raw);
+  s = s.replace(/(\d+)\)\s+/g, "\n$1) ");
+  s = s.replace(/(\d+)\.\s+/g, "\n$1. ");
+  s = s.replace(/;\s+/g, ";\n");
+  s = s.replace(/\n{3,}/g, "\n\n");
+  const lines = s.split("\n").map(l => l.trim()).filter(Boolean);
+  if (lines.length <= 1) return s.trim();
+  return lines.map(l => {
+    if (/^\d+[\.\)]/.test(l)) return `<div style="padding:3px 0 3px 8px;border-left:2px solid var(--border-2);margin:3px 0">${l}</div>`;
+    return `<div style="margin:3px 0">${l}</div>`;
+  }).join("");
+}
 function closeDrawer() { $("#drawerBg").classList.remove("open"); $("#drawer").classList.remove("open"); }
 
 async function setFindingStatus(id, status) {
   await api(`/api/findings/${id}/status`, { method: "PATCH", body: JSON.stringify({ status }) });
   const f = State.findings.find((x) => x.id === id); if (f) f.status = status;
-  closeDrawer(); viewFindings(); toast("Verdict: " + status.replace("_", " "));
+  closeDrawer(); viewFindings(); toast("Verdict: " + status.replace("_", " "), "success");
+}
+
+async function deleteFinding(id) {
+  const f = State.findings.find((x) => x.id === id);
+  const yes = await showDialog({ title: "Delete Finding", message: `Hapus finding "${f ? f.title : "#" + id}" ? Aksi ini tidak dapat dibatalkan.`, okText: "Delete", danger: true });
+  if (!yes) return;
+  await api(`/api/findings/${id}`, { method: "DELETE" });
+  closeDrawer(); viewFindings(); toast("Finding deleted", "success");
+}
+
+async function resetAllFindings(targetId) {
+  const yes = await showDialog({ title: "Reset All Findings", message: `Hapus SEMUA findings untuk target ini? Semua data temuan, evidence, dan status akan dihapus permanen.`, okText: "Reset All", danger: true });
+  if (!yes) return;
+  await api(`/api/findings?target_id=${targetId}`, { method: "DELETE" });
+  viewFindings(); toast("All findings reset", "success");
 }
 
 /* ----------------------------- Knowledge ----------------------------- */
@@ -1027,6 +1318,97 @@ async function viewAudit() {
   </tbody></table></div>`;
 }
 
+/* ----------------------------- Scheduled Scans ----------------------------- */
+async function viewSchedules() {
+  const t = currentTarget();
+  const c = $("#content");
+  if (!t) { c.innerHTML = emptyNoTarget(); bindEmpty(); return; }
+  c.innerHTML = `<div class="muted">Loading…</div>`;
+  const schedules = await api("/api/schedules?target_id=" + t.id);
+  c.innerHTML = `
+    <div class="row spread" style="margin-bottom:14px">
+      <span class="muted">${schedules.length} schedule(s) for ${esc(t.value)}</span>
+      <button class="btn sm" id="addSchedule">+ Add Schedule</button>
+    </div>
+    ${schedules.length ? `<div class="card"><table><thead><tr><th>Cron</th><th>Profile</th><th>Status</th><th>Last Run</th><th>Next Run</th><th></th></tr></thead><tbody>
+    ${schedules.map((s) => `<tr>
+      <td><code>${esc(s.cron_expr)}</code></td>
+      <td>${esc(s.profile)}</td>
+      <td><span class="pill ${s.enabled ? "confirmed" : "needs_review"}">${s.enabled ? "Active" : "Paused"}</span></td>
+      <td class="muted">${s.last_run ? fmtTime(s.last_run) : "—"}</td>
+      <td class="muted">${s.next_run ? fmtTime(s.next_run) : "—"}</td>
+      <td>
+        <button class="btn ghost sm toggle-sched" data-sid="${s.id}" data-en="${s.enabled ? 0 : 1}">${s.enabled ? "Pause" : "Resume"}</button>
+        <button class="btn danger sm del-sched" data-sid="${s.id}" style="margin-left:4px">Delete</button>
+      </td></tr>`).join("")}
+    </tbody></table></div>` : `<div class="empty">No scheduled scans. Click "Add Schedule" to set up recurring VA scans.</div>`}
+    <div class="hint" style="margin-top:14px">Cron format: minute hour day month weekday. Example: <code>0 2 * * 1</code> = setiap Senin jam 2 pagi.</div>`;
+  $("#addSchedule").addEventListener("click", () => addScheduleDialog(t));
+  c.querySelectorAll(".toggle-sched").forEach((b) => b.addEventListener("click", async () => {
+    await api(`/api/schedules/${b.dataset.sid}`, { method: "PATCH", body: JSON.stringify({ enabled: b.dataset.en === "1" }) });
+    viewSchedules();
+  }));
+  c.querySelectorAll(".del-sched").forEach((b) => b.addEventListener("click", async () => {
+    const yes = await showDialog({ title: "Delete Schedule", message: "Hapus jadwal scan ini?", okText: "Delete", danger: true });
+    if (!yes) return;
+    await api(`/api/schedules/${b.dataset.sid}`, { method: "DELETE" });
+    viewSchedules(); toast("Schedule deleted", "success");
+  }));
+}
+
+async function addScheduleDialog(t) {
+  const cron = await showDialog({ type: "prompt", title: "Add Scheduled Scan", message: "Masukkan cron expression (contoh: 0 2 * * 1 = setiap Senin jam 2 pagi):", placeholder: "0 2 * * 1", okText: "Create" });
+  if (!cron) return;
+  try {
+    await api("/api/schedules", { method: "POST", body: JSON.stringify({ target_id: t.id, cron_expr: cron, profile: "full" }) });
+    viewSchedules(); toast("Schedule created", "success");
+  } catch (e) { toast(e.message, "error"); }
+}
+
+/* ----------------------------- Vulnerability Trending ----------------------------- */
+async function viewTrending() {
+  const t = currentTarget();
+  const c = $("#content");
+  if (!t) { c.innerHTML = emptyNoTarget(); bindEmpty(); return; }
+  c.innerHTML = `<div class="muted">Loading trending data…</div>`;
+  const data = await api(`/api/scans/trending/${t.id}`);
+  if (!data.length) { c.innerHTML = `<div class="empty">No completed scans for ${esc(t.value)} yet. Run a VA scan first.</div>`; return; }
+  const maxTotal = Math.max(...data.map(d => d.total), 1);
+  c.innerHTML = `
+    <div class="hint" style="margin-bottom:14px">Vulnerability trend across ${data.length} scan(s) for ${esc(t.value)}. Track remediation progress over time.</div>
+    <div class="card">
+      <table><thead><tr><th>Date</th><th>Profile</th><th>Total</th><th style="color:#dc2626">Crit</th><th style="color:#ea580c">High</th><th style="color:#d97706">Med</th><th style="color:#2563eb">Low</th><th>Info</th><th>Avg CVSS</th><th>Trend</th></tr></thead><tbody>
+      ${data.map((d) => `<tr>
+        <td class="muted">${fmtTime(d.date)}</td>
+        <td>${esc(d.profile)}</td>
+        <td><b>${d.total}</b></td>
+        <td>${d.critical || "—"}</td>
+        <td>${d.high || "—"}</td>
+        <td>${d.medium || "—"}</td>
+        <td>${d.low || "—"}</td>
+        <td>${d.info || "—"}</td>
+        <td>${d.avg_cvss ? `<b style="color:${cvssColor(d.avg_cvss)}">${d.avg_cvss}</b>` : "—"}</td>
+        <td><div style="background:var(--border);border-radius:3px;height:14px;width:120px;overflow:hidden">
+          <div style="height:100%;display:flex">
+            <div style="width:${(d.critical/maxTotal*100).toFixed(1)}%;background:#dc2626"></div>
+            <div style="width:${(d.high/maxTotal*100).toFixed(1)}%;background:#ea580c"></div>
+            <div style="width:${(d.medium/maxTotal*100).toFixed(1)}%;background:#d97706"></div>
+            <div style="width:${(d.low/maxTotal*100).toFixed(1)}%;background:#2563eb"></div>
+            <div style="width:${(d.info/maxTotal*100).toFixed(1)}%;background:#64748b"></div>
+          </div></div></td>
+      </tr>`).join("")}
+      </tbody></table>
+    </div>
+    ${data.length >= 2 ? `<div class="card" style="margin-top:16px;padding:16px">
+      <h3 style="margin:0 0 10px">Remediation Progress</h3>
+      <div class="row" style="gap:24px">
+        <div><span class="muted">First scan:</span> <b>${data[0].total}</b> findings</div>
+        <div><span class="muted">Latest scan:</span> <b>${data[data.length-1].total}</b> findings</div>
+        <div><span class="muted">Change:</span> <b style="color:${data[data.length-1].total <= data[0].total ? "#047857" : "#dc2626"}">${data[data.length-1].total - data[0].total >= 0 ? "+" : ""}${data[data.length-1].total - data[0].total}</b></div>
+      </div>
+    </div>` : ""}`;
+}
+
 /* ----------------------------- Settings ----------------------------- */
 function viewSettings() {
   const s = State.status || {};
@@ -1052,7 +1434,7 @@ function viewSettings() {
   $("#cpBtn").addEventListener("click", async () => {
     try {
       await api("/api/auth/change-password", { method: "POST", body: JSON.stringify({ current_password: $("#cpCur").value, new_password: $("#cpNew").value }) });
-      $("#cpCur").value = ""; $("#cpNew").value = ""; toast("Password updated");
+      $("#cpCur").value = ""; $("#cpNew").value = ""; toast("Password updated", "success");
     } catch (e) { $("#cpErr").textContent = e.message; }
   });
 }
@@ -1062,21 +1444,28 @@ async function viewReports() {
   const t = currentTarget();
   const c = $("#content");
   if (!t) { c.innerHTML = emptyNoTarget(); bindEmpty(); return; }
+  const reportUrl = `/report/${t.id}?token=${encodeURIComponent(State.token)}`;
   c.innerHTML = `
     <div class="section-title"><h3>VAPT report — ${esc(t.value)}</h3><div class="spacer"></div>
-      <button class="btn sm" id="openReport">⎙ Open full report (print / PDF)</button></div>
+      <button class="btn sm" id="printReport">⎙ Print / Save PDF</button>
+      <button class="btn ghost sm" id="openReport">↗ Open full report</button></div>
     <div class="hint">Laporan AI mencakup ringkasan eksekutif, rincian temuan, bukti/PoC, confidence, dan
-      <b>konfigurasi perbaikan konkret</b> (siap pakai) per temuan. Buka laporan lalu "Print / Save PDF".</div>
+      <b>konfigurasi perbaikan konkret</b> (siap pakai) per temuan.</div>
     <div class="card" style="margin-top:14px;padding:0;overflow:hidden">
       <iframe id="reportFrame" style="width:100%;height:70vh;border:0;background:#fff" title="report preview"></iframe>
     </div>`;
+  $("#printReport").addEventListener("click", () => {
+    window.open(reportUrl, "_blank");
+    toast("Report dibuka di tab baru — gunakan Print / Save PDF di sana");
+  });
   $("#openReport").addEventListener("click", () => {
-    window.open(`/report/${t.id}?token=${encodeURIComponent(State.token)}`, "_blank");
+    window.open(reportUrl, "_blank");
   });
   // Inline preview via authenticated fetch (iframe can't send Authorization header).
   try {
     const res = await fetch(`/api/targets/${t.id}/report`, { headers: { Authorization: "Bearer " + State.token } });
-    const htmlStr = await res.text();
+    let htmlStr = await res.text();
+    htmlStr = htmlStr.replace('</head>', '<style>.toolbar{display:none!important}</style></head>');
     $("#reportFrame").srcdoc = htmlStr;
   } catch (e) { toast("Report preview failed: " + e.message); }
 }
@@ -1086,27 +1475,58 @@ async function viewDomainHealth() {
   const t = currentTarget();
   const c = $("#content");
   if (!t) { c.innerHTML = emptyNoTarget(); bindEmpty(); return; }
-  c.innerHTML = `<div class="muted">Probing ${esc(t.value)} (DNS · TLS · HTTP)…</div>`;
+  c.innerHTML = `<div class="muted">Probing ${esc(t.value)} (DNS · TLS · HTTP · Headers)…</div>`;
   try {
     const h = await api(`/api/modules/domain-health/${t.id}`);
     const gradeColor = h.score >= 85 ? "var(--ok)" : h.score >= 60 ? "var(--warn)" : "var(--critical)";
+    const secHeaders = (h.http.security_headers || []);
+    const shPresent = secHeaders.filter(s => s.present).length;
+    const shTotal = secHeaders.length;
+    const dns = h.dns || {};
+
     c.innerHTML = `
       <div class="grid stats">
         ${statCard("Health score", h.score + "/100", h.issues.length + " issue(s)", gradeColor)}
-        ${statCard("TLS", (h.tls.protocol || "—"), h.tls.cipher || (h.tls.error ? "probe error" : ""), h.tls.protocol && h.tls.protocol >= "TLSv1.2" ? "var(--ok)" : "var(--warn)")}
-        ${statCard("DNS A-records", (h.dns.resolved || []).length, (h.dns.resolved || []).join(", ") || h.dns.error || "—", "var(--muted)")}
+        ${statCard("TLS", (h.tls.protocol || "—"), h.tls.cipher || (h.tls.error ? "probe error" : ""), h.tls.ok ? "var(--ok)" : "var(--warn)")}
+        ${statCard("Security headers", shTotal ? shPresent + "/" + shTotal : "—", shTotal ? (shPresent === shTotal ? "All present" : (shTotal - shPresent) + " missing") : "No data", shPresent === shTotal ? "var(--ok)" : "var(--warn)")}
+        ${statCard("DNS records", (dns.resolved || []).length + " A", (dns.mx || []).length + " MX · " + (dns.ns || []).length + " NS", "var(--muted)")}
       </div>
+
+      <div class="section-title"><h3>Security headers</h3></div>
+      <div class="card">${secHeaders.length ? `<table>
+        <thead><tr><th>Header</th><th>Status</th><th>Value</th><th>Description</th></tr></thead>
+        <tbody>${secHeaders.map(s => `<tr>
+          <td><b>${esc(s.header)}</b></td>
+          <td>${s.present ? '<span class="pill ok" style="font-size:11px">✓ Present</span>' : '<span class="pill critical" style="font-size:11px">✗ Missing</span>'}</td>
+          <td style="max-width:250px;overflow:hidden;text-overflow:ellipsis;font-size:12px">${esc(s.value || "—")}</td>
+          <td class="muted" style="font-size:12px">${esc(s.description || "")}</td>
+        </tr>`).join("")}</tbody>
+      </table>` : '<div class="muted">Could not probe security headers (target unreachable)</div>'}</div>
+
+      <div class="section-title"><h3>DNS records</h3></div>
+      <div class="card"><table>
+        <tr><th>A records</th><td>${(dns.resolved || []).map(r => esc(r)).join(", ") || esc(dns.error || "—")}</td></tr>
+        <tr><th>MX records</th><td>${(dns.mx || []).map(r => esc(r)).join(", ") || "—"}</td></tr>
+        <tr><th>NS records</th><td>${(dns.ns || []).map(r => esc(r)).join(", ") || "—"}</td></tr>
+        <tr><th>SPF</th><td>${dns.has_spf ? '<span class="pill ok" style="font-size:11px">✓ Present</span>' : '<span class="pill critical" style="font-size:11px">✗ Missing</span>'}</td></tr>
+        <tr><th>DMARC</th><td>${dns.has_dmarc ? '<span class="pill ok" style="font-size:11px">✓ Present</span>' : '<span class="pill critical" style="font-size:11px">✗ Missing</span>'}</td></tr>
+      </table></div>
+
       <div class="section-title"><h3>TLS / certificate</h3></div>
       <div class="card"><table>
         <tr><th>Protocol</th><td>${esc(h.tls.protocol || "—")}</td></tr>
-        <tr><th>Cipher</th><td>${esc(h.tls.cipher || "—")}</td></tr>
+        <tr><th>Cipher suite</th><td>${esc(h.tls.cipher || "—")}</td></tr>
         <tr><th>Issuer</th><td>${esc(h.tls.issuer || "—")}</td></tr>
         <tr><th>Expires</th><td>${esc(h.tls.expires || "—")}</td></tr>
+        <tr><th>SAN</th><td>${(h.tls.san || []).map(s => esc(s)).join(", ") || "—"}</td></tr>
+        <tr><th>Signature algorithm</th><td>${esc(h.tls.sig_alg || "—")}</td></tr>
       </table></div>
+
       <div class="section-title"><h3>HTTP probe (httpx)</h3></div>
       <div class="card"><div class="codeblock">${esc(h.http.raw || "—")}</div></div>
-      <div class="section-title"><h3>Issues</h3></div>
-      <div class="card">${h.issues.length ? h.issues.map((i) => `<div class="row" style="margin:6px 0"><span class="pill ${i.sev}">${i.sev}</span><span>${esc(i.msg)}</span></div>`).join("") : `<div class="muted">No issues detected.</div>`}</div>`;
+
+      <div class="section-title"><h3>Issues (${h.issues.length})</h3></div>
+      <div class="card">${h.issues.length ? h.issues.map((i) => `<div class="row" style="margin:6px 0"><span class="pill ${i.sev}">${i.sev}</span><span>${esc(i.msg)}</span></div>`).join("") : `<div class="muted">No issues detected — looking good!</div>`}</div>`;
   } catch (e) { c.innerHTML = `<div class="empty"><h3>Domain Health</h3><p>${esc(e.message)}</p></div>`; }
 }
 

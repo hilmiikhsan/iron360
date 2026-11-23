@@ -22,6 +22,8 @@ from .models import User
 settings = get_settings()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
 
+_blacklisted_tokens: set[str] = set()
+
 _PBKDF2_ITERATIONS = 240_000
 
 
@@ -63,7 +65,7 @@ def get_current_user(
         detail="Not authenticated",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    if not token:
+    if not token or token in _blacklisted_tokens:
         raise cred_exc
     try:
         payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_alg])
@@ -74,3 +76,7 @@ def get_current_user(
     if not user or not user.is_active:
         raise cred_exc
     return user
+
+
+def blacklist_token(token: str) -> None:
+    _blacklisted_tokens.add(token)

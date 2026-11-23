@@ -52,7 +52,8 @@ def _extract_hosts(host: str, options: dict) -> list[str]:
 
 def run(target: Target, tool_name: str, host: str, options: dict | None = None,
         stop_event: threading.Event | None = None,
-        line_emit: Callable[[str], None] | None = None) -> ExecResult:
+        line_emit: Callable[[str], None] | None = None,
+        timeout: int | None = None) -> ExecResult:
     """Execute a tool and return the result. If `line_emit` is provided, each stdout line is
     forwarded to it in real-time so the frontend can stream output live (Claude-Code-style)."""
     options = options or {}
@@ -127,7 +128,7 @@ def run(target: Target, tool_name: str, host: str, options: dict | None = None,
             cancelled = True
             proc.kill()
             break
-        if time.time() - started > settings.tool_timeout:
+        if time.time() - started > (timeout or settings.tool_timeout):
             timed_out = True
             proc.kill()
             break
@@ -147,7 +148,8 @@ def run(target: Target, tool_name: str, host: str, options: dict | None = None,
         return ExecResult(False, tool_name, host, command, stdout=stdout[:20000], stderr=stderr[:4000],
                           denied_reason="stopped by operator", duration_s=duration)
     if timed_out:
-        return ExecResult(False, tool_name, host, command, denied_reason=f"timed out after {settings.tool_timeout}s",
+        return ExecResult(False, tool_name, host, command,
+                          denied_reason=f"timed out after {timeout or settings.tool_timeout}s",
                           duration_s=duration)
 
     code = proc.returncode

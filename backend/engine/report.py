@@ -23,6 +23,28 @@ def _esc(s: str) -> str:
     return html.escape(str(s or ""))
 
 
+def _fmt(s: str) -> str:
+    """Format plain text into readable HTML: split numbered lists and semicolons into lines."""
+    import re
+    if not s:
+        return "—"
+    t = html.escape(str(s))
+    t = re.sub(r'(\d+)\)\s+', r'\n\1) ', t)
+    t = re.sub(r'(\d+)\.\s+', r'\n\1. ', t)
+    t = re.sub(r';\s+', ';\n', t)
+    t = re.sub(r'\n{3,}', '\n\n', t)
+    lines = [l.strip() for l in t.split('\n') if l.strip()]
+    if len(lines) <= 1:
+        return t.strip()
+    parts = []
+    for l in lines:
+        if re.match(r'^\d+[\.\)]', l):
+            parts.append(f'<div style="padding:2px 0 2px 12px;border-left:3px solid #cbd5e1;margin:4px 0">{l}</div>')
+        else:
+            parts.append(f'<div style="margin:3px 0">{l}</div>')
+    return ''.join(parts)
+
+
 def executive_summary(target: Target, findings: list[Finding]) -> str:
     counts = {s: sum(1 for f in findings if f.severity == s) for s in _SEV_ORDER}
     confirmed = sum(1 for f in findings if f.status == "confirmed")
@@ -66,7 +88,7 @@ def _finding_block(f: Finding, idx: int) -> str:
     if f.fix_config:
         fix += f'<div class="fixlabel">Konfigurasi perbaikan (siap pakai)</div><pre class="fix">{_esc(f.fix_config)}</pre>'
     if f.fix_steps:
-        fix += f'<div class="fixlabel">Langkah penerapan &amp; verifikasi</div><pre class="steps">{_esc(f.fix_steps)}</pre>'
+        fix += f'<div class="fixlabel">Langkah penerapan &amp; verifikasi</div><div class="steps-block">{_fmt(f.fix_steps)}</div>'
     return f"""
     <div class="finding">
       <div class="fhead">
@@ -77,11 +99,14 @@ def _finding_block(f: Finding, idx: int) -> str:
       <table class="meta">
         <tr><th>Affected</th><td>{_esc(f.affected) or '—'}</td></tr>
         {'<tr><th>CVE</th><td>'+_esc(f.cve)+'</td></tr>' if f.cve else ''}
+        {'<tr><th>CVSS v3.1</th><td><b>'+str(f.cvss_score)+'</b> · '+_esc(f.cvss_vector or '')+'</td></tr>' if f.cvss_score else ''}
+        {'<tr><th>CWE</th><td>'+_esc(f.cwe)+'</td></tr>' if f.cwe else ''}
         <tr><th>Sumber korelasi</th><td>{_esc(', '.join(f.sources or []) or '—')}</td></tr>
+        {'<tr><th>Referensi</th><td>'+'<br>'.join('<a href="'+_esc(r)+'">'+_esc(r)+'</a>' for r in (f.references or []))+'</td></tr>' if f.references else ''}
       </table>
-      <div class="flabel">Deskripsi</div><p>{_esc(f.description) or '—'}</p>
+      <div class="flabel">Deskripsi</div><div style="font-size:13.5px;line-height:1.6">{_fmt(f.description)}</div>
       <div class="flabel">Bukti / PoC</div><pre class="evidence">{_esc(f.evidence) or '(tidak ada)'}</pre>
-      <div class="flabel">Rekomendasi</div><p>{_esc(f.remediation) or '—'}</p>
+      <div class="flabel">Rekomendasi</div><div style="font-size:13.5px;line-height:1.6">{_fmt(f.remediation)}</div>
       {fix}
     </div>"""
 
@@ -155,35 +180,69 @@ def build_report_html(target: Target, findings: list[Finding], summary: str, int
  .logo {{ width:40px;height:40px;border-radius:9px;background:linear-gradient(135deg,#38bdf8,#6366f1);color:#fff;font-weight:800;display:grid;place-items:center;font-size:18px; }}
  h1 {{ font-size: 22px; margin: 2px 0; }}
  .sub {{ color:#64748b; font-size: 13px; }}
- .toolbar {{ position: sticky; top:0; background:#0f172a; padding:10px 14px; display:flex; gap:10px; }}
+ .toolbar {{ position: sticky; top:0; background:#0f172a; padding:10px 14px; display:flex; gap:10px; z-index:10; }}
  .toolbar button {{ background:#0ea5e9; color:#042; border:none; border-radius:7px; padding:8px 14px; font-weight:700; cursor:pointer; }}
  .toolbar button.sec {{ background:#334155; color:#e2e8f0; }}
  table.info {{ width:100%; border-collapse:collapse; margin:20px 0; font-size:13.5px; }}
  table.info th {{ text-align:left; width:180px; color:#64748b; font-weight:600; padding:6px 0; vertical-align:top; }}
+ table.info td {{ padding:6px 0; }}
  .chips {{ display:flex; gap:10px; flex-wrap:wrap; margin:16px 0; }}
  .chip {{ border:2px solid; border-radius:10px; padding:8px 14px; font-size:12px; text-transform:uppercase; letter-spacing:.5px; }}
  .chip b {{ font-size:18px; display:block; }}
  h2.sec {{ font-size:16px; border-left:4px solid #0ea5e9; padding-left:10px; margin:34px 0 12px; }}
- .finding {{ border:1px solid #e2e8f0; border-radius:12px; padding:18px; margin:16px 0; page-break-inside: avoid; }}
- .fhead {{ display:flex; align-items:center; gap:10px; }}
- .fhead h3 {{ font-size:15px; margin:0; flex:1; }}
- .sev {{ color:#fff; font-size:11px; font-weight:800; padding:3px 9px; border-radius:6px; }}
- .status {{ font-size:11px; padding:3px 9px; border-radius:999px; border:1px solid #cbd5e1; color:#475569; }}
+ .finding {{ border:1px solid #e2e8f0; border-radius:12px; padding:20px; margin:20px 0; }}
+ .fhead {{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }}
+ .fhead h3 {{ font-size:15px; margin:0; flex:1; min-width:200px; }}
+ .sev {{ color:#fff; font-size:11px; font-weight:800; padding:3px 9px; border-radius:6px; flex:none; }}
+ .status {{ font-size:11px; padding:3px 9px; border-radius:999px; border:1px solid #cbd5e1; color:#475569; flex:none; }}
  .status-confirmed {{ border-color:#10b981; color:#047857; }}
  .status-false_positive {{ text-decoration: line-through; color:#94a3b8; }}
- table.meta {{ width:100%; border-collapse:collapse; margin:10px 0; font-size:13px; }}
- table.meta th {{ text-align:left; width:140px; color:#64748b; font-weight:600; padding:3px 0; }}
- .flabel, .fixlabel {{ font-size:11px; text-transform:uppercase; letter-spacing:.6px; color:#64748b; margin:12px 0 4px; font-weight:700; }}
+ table.meta {{ width:100%; border-collapse:collapse; margin:12px 0; font-size:13px; }}
+ table.meta th {{ text-align:left; width:140px; color:#64748b; font-weight:600; padding:5px 0; vertical-align:top; }}
+ table.meta td {{ padding:5px 0; }}
+ .flabel, .fixlabel {{ font-size:11px; text-transform:uppercase; letter-spacing:.6px; color:#64748b; margin:16px 0 6px; font-weight:700; }}
  .fixlabel {{ color:#047857; }}
- pre {{ background:#0f172a; color:#e2e8f0; padding:12px 14px; border-radius:8px; font-size:12px; overflow:auto; white-space:pre-wrap; word-break:break-word; font-family: ui-monospace, Menlo, Consolas, monospace; }}
+ pre {{ background:#0f172a; color:#e2e8f0; padding:14px 16px; border-radius:8px; font-size:12px; overflow:auto; white-space:pre-wrap; word-break:break-word; font-family: ui-monospace, Menlo, Consolas, monospace; line-height:1.6; }}
  pre.fix {{ background:#042f2e; }}
  pre.steps {{ background:#1e293b; }}
  pre.evidence {{ background:#1e1b4b; }}
- p {{ font-size:13.5px; line-height:1.6; }}
+ p {{ font-size:13.5px; line-height:1.7; }}
  .muted {{ color:#94a3b8; }}
  .foot {{ margin-top:40px; border-top:1px solid #e2e8f0; padding-top:14px; color:#94a3b8; font-size:12px; }}
- @media print {{ .toolbar {{ display:none; }} body {{ background:#fff; }} .page {{ padding:0; }} }}
-</style></head><body>
+ .steps-block {{ background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:14px 16px; font-size:12.5px; line-height:1.7; font-family: ui-monospace, Menlo, Consolas, monospace; }}
+
+ @media print {{
+   body {{ background:#fff !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+   .toolbar {{ display:none !important; }}
+   .page {{ max-width:none; padding:0; margin:0; box-shadow:none; }}
+   .brand {{ border-bottom:3px solid #0ea5e9; }}
+   .finding {{ page-break-inside: avoid; border:1px solid #cbd5e1; margin:14px 0; padding:16px; }}
+   .fhead {{ flex-wrap: wrap; }}
+   h2.sec {{ page-break-after: avoid; }}
+   pre {{ background:#f1f5f9 !important; color:#0f172a !important; border:1px solid #cbd5e1; font-size:11px; padding:10px 12px; }}
+   pre.fix {{ background:#ecfdf5 !important; border-color:#a7f3d0; }}
+   pre.evidence {{ background:#eef2ff !important; border-color:#c7d2fe; }}
+   .steps-block {{ background:#f8fafc !important; border:1px solid #cbd5e1; page-break-inside: avoid; }}
+   .sev {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+   .chip {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+   .chips {{ page-break-inside: avoid; }}
+   table.info, table.meta {{ page-break-inside: avoid; }}
+   a {{ color:#0ea5e9; text-decoration:none; }}
+   .foot {{ page-break-before: avoid; }}
+ }}
+</style>
+<script>
+ (function() {{
+   var inFrame = false;
+   try {{ inFrame = window.self !== window.top || window.frameElement; }} catch(e) {{ inFrame = true; }}
+   if (inFrame) {{
+     var s = document.createElement('style');
+     s.textContent = '.toolbar {{ display:none !important; }}';
+     document.head.appendChild(s);
+   }}
+ }})();
+</script>
+</head><body>
 <div class="toolbar"><button onclick="window.print()">⎙ Print / Save PDF</button>
   <button class="sec" onclick="window.close()">Close</button>
   <span style="color:#64748b;align-self:center;font-size:12px">Engine: {engine}</span></div>

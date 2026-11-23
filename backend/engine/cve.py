@@ -20,7 +20,7 @@ def extract(text: str) -> list[str]:
 
 @lru_cache(maxsize=512)
 def nvd_lookup(cve: str) -> dict:
-    out = {"cve": cve, "cvss": None, "severity": None, "summary": "", "url": f"https://nvd.nist.gov/vuln/detail/{cve}"}
+    out = {"cve": cve, "cvss": None, "severity": None, "vector": None, "summary": "", "url": f"https://nvd.nist.gov/vuln/detail/{cve}"}
     try:
         r = httpx.get("https://services.nvd.nist.gov/rest/json/cves/2.0",
                       params={"cveId": cve}, timeout=10,
@@ -38,6 +38,7 @@ def nvd_lookup(cve: str) -> dict:
                 data = m.get("cvssData", {})
                 out["cvss"] = data.get("baseScore")
                 out["severity"] = (data.get("baseSeverity") or m.get("baseSeverity") or "").upper() or None
+                out["vector"] = data.get("vectorString")
                 break
         out["summary"] = next((d["value"] for d in v.get("descriptions", []) if d.get("lang") == "en"), "")[:320]
     except Exception:  # noqa: BLE001

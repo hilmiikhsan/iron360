@@ -10,7 +10,7 @@ from ..audit import record
 from ..database import get_db
 from ..models import User
 from ..schemas import ChangePassword, Token
-from ..security import create_token, get_current_user, hash_password, verify_password
+from ..security import blacklist_token, create_token, get_current_user, hash_password, oauth2_scheme, verify_password
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -32,6 +32,17 @@ def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
 @router.get("/me")
 def me(user: User = Depends(get_current_user)) -> dict:
     return {"username": user.username, "role": user.role}
+
+
+@router.post("/logout")
+def logout(
+    user: User = Depends(get_current_user),
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
+) -> dict:
+    blacklist_token(token)
+    record(db, actor=user.username, action="logout", outcome="ok")
+    return {"ok": True}
 
 
 @router.post("/change-password")

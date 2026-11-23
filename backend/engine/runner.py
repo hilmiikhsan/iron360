@@ -94,12 +94,65 @@ def start_pentest_session(scan_id: int) -> None:
         db.commit()
 
         _stop_events[scan_id] = threading.Event()
-        _chat_sessions[scan_id] = []
         _chat_locks[scan_id] = threading.Lock()
+
+        # Seed conversation with context from previous sessions on the same target
+        seed = _build_session_seed(db, scan.target_id, scan_id)
+        _chat_sessions[scan_id] = seed
+
         _publish(scan_id, {"type": "note", "text": "Pentest agent ready. Type your instructions."})
         _publish(scan_id, {"type": "chat_ready"})
     finally:
         db.close()
+
+
+def _build_session_seed(db, target_id: int, current_scan_id: int) -> list[dict]:
+    """Build conversation seed from previous scans' findings + tools run."""
+    prev_scans = (
+        db.query(Scan)
+        .filter(Scan.target_id == target_id, Scan.id != current_scan_id)
+        .order_by(Scan.started_at.desc())
+        .limit(3)
+        .all()
+    )
+    if not prev_scans:
+        return []
+
+    findings = (
+        db.query(Finding)
+        .filter(Finding.target_id == target_id)
+        .order_by(Finding.severity.desc())
+        .all()
+    )
+
+    parts = ["[Previous session context — DO NOT repeat work already done]\n"]
+
+    for ps in prev_scans:
+        tl = ps.timeline or []
+        tools_run = [e.get("tool", e.get("command", "?")) for e in tl if e.get("type") in ("exec", "agent_tool_start")]
+        texts = [e["text"] for e in tl if e.get("type") == "agent_text" and e.get("text")]
+        parts.append(f"Session #{ps.id} ({ps.mode}/{ps.profile}, {ps.status}):")
+        if tools_run:
+            parts.append(f"  Tools already run: {', '.join(dict.fromkeys(tools_run))}")
+        if texts:
+            last_analysis = texts[-1]
+            if len(last_analysis) > 600:
+                last_analysis = last_analysis[:600] + "…"
+            parts.append(f"  Last analysis:\n  {last_analysis}")
+
+    if findings:
+        parts.append(f"\nExisting findings ({len(findings)}):")
+        for f in findings[:15]:
+            status_tag = f" [{f.status}]" if f.status else ""
+            parts.append(f"  [{f.severity.upper()}] {f.title}{status_tag} (conf {f.confidence}%)")
+
+    parts.append("\nContinue from where the previous session left off. Do NOT re-run tools that already completed successfully.")
+
+    seed_text = "\n".join(parts)
+    return [
+        {"role": "user", "content": seed_text},
+        {"role": "assistant", "content": "Understood. I have context from the previous session(s) and will continue from where we left off without repeating completed work."},
+    ]
 
 
 def submit_chat(scan_id: int, message: str) -> bool:
@@ -154,12 +207,16 @@ def _run_chat_turn(scan_id: int, message: str) -> None:
                     status=data.get("status", "needs_review"),
                     confidence=int(data.get("confidence", 0)),
                     cve=data.get("cve", ""),
+                    cvss_score=data.get("cvss_score"),
+                    cvss_vector=data.get("cvss_vector", ""),
+                    cwe=data.get("cwe", ""),
                     affected=data.get("affected", ""),
                     description=data.get("description", ""),
                     evidence=data.get("evidence", ""),
                     remediation=data.get("remediation", ""),
                     fix_config=data.get("fix_config", ""),
                     fix_steps=data.get("fix_steps", ""),
+                    references=data.get("references", []),
                     sources=data.get("sources", []),
                 )
                 db.add(f)
@@ -248,12 +305,16 @@ def _run(scan_id: int) -> None:
                 status=data.get("status", "needs_review"),
                 confidence=int(data.get("confidence", 0)),
                 cve=data.get("cve", ""),
+                cvss_score=data.get("cvss_score"),
+                cvss_vector=data.get("cvss_vector", ""),
+                cwe=data.get("cwe", ""),
                 affected=data.get("affected", ""),
                 description=data.get("description", ""),
                 evidence=data.get("evidence", ""),
                 remediation=data.get("remediation", ""),
                 fix_config=data.get("fix_config", ""),
                 fix_steps=data.get("fix_steps", ""),
+                references=data.get("references", []),
                 sources=data.get("sources", []),
             )
             db.add(f)

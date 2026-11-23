@@ -168,6 +168,21 @@ _register(Tool(
     build=lambda host, o: ["sslscan", "--no-colour", host],
 ))
 
+_register(Tool(
+    name="testssl", binary="testssl", category="va", intensity="active",
+    description="Deep TLS/SSL audit — protocols, ciphers, certificate chain, BEAST/POODLE/ROBOT/Heartbleed.",
+    build=lambda host, o: ["testssl", "--quiet", "--color", "0", "--fast",
+                           "--vulnerable", "--headers", host],
+))
+
+_register(Tool(
+    name="wapiti", binary="wapiti", category="va", intensity="active",
+    description="Web application vulnerability scanner — XSS, SQLi, file inclusion, SSRF, command injection, XXE.",
+    build=lambda host, o: ["wapiti", "-u", _url(host, o), "--flush-session",
+                           "-f", "txt", "--color", "--timeout", "10", "-S", "normal"],
+    needs_scheme=True,
+))
+
 # ---------------------------------------------------------------- VA
 _register(Tool(
     name="nmap", binary="nmap", category="va", intensity="active",

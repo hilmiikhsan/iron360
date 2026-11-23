@@ -9,7 +9,7 @@ from ..config import get_settings
 from ..database import SessionLocal, get_db
 from ..engine import runner
 from ..models import Finding, Scan, Target, User
-from ..schemas import ApprovalDecision, ChatMessage, ScanCreate, ScanOut
+from ..schemas import ApprovalDecision, ChatMessage, ScanBrief, ScanCreate, ScanOut
 from ..security import get_current_user
 
 router = APIRouter(prefix="/api/scans", tags=["scans"])
@@ -47,7 +47,7 @@ def create_scan(body: ScanCreate, db: Session = Depends(get_db), user: User = De
     return scan
 
 
-@router.get("", response_model=list[ScanOut])
+@router.get("", response_model=list[ScanBrief])
 def list_scans(target_id: int | None = None, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     q = db.query(Scan)
     if target_id is not None:
@@ -121,7 +121,8 @@ def _fkey(f: Finding) -> str:
 
 def _fbrief(f: Finding) -> dict:
     return {"id": f.id, "title": f.title, "severity": f.severity, "status": f.status,
-            "confidence": f.confidence, "cve": f.cve, "affected": f.affected}
+            "confidence": f.confidence, "cve": f.cve, "affected": f.affected,
+            "cvss_score": f.cvss_score, "cvss_vector": f.cvss_vector, "cwe": f.cwe}
 
 
 @router.get("/{scan_id}/diff")
@@ -158,6 +159,29 @@ def diff_scan(scan_id: int, against: int | None = None,
                   for k, c in cur_map.items() if k in base_map]
     return {"current_scan": scan_id, "baseline_scan": base.id,
             "new": new, "fixed": fixed, "persistent": persistent}
+
+
+@router.get("/trending/{target_id}")
+def trending(target_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Vulnerability trending: severity counts per completed scan for a target."""
+    scans = (db.query(Scan)
+             .filter(Scan.target_id == target_id, Scan.status.in_(["done", "stopped"]))
+             .order_by(Scan.started_at).all())
+    result = []
+    for s in scans:
+        findings = db.query(Finding).filter(Finding.scan_id == s.id,
+                                             Finding.status != "false_positive").all()
+        counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+        for f in findings:
+            counts[f.severity] = counts.get(f.severity, 0) + 1
+        result.append({
+            "scan_id": s.id, "profile": s.profile, "date": s.started_at.isoformat(),
+            "total": len(findings), **counts,
+            "avg_cvss": round(sum(f.cvss_score for f in findings if f.cvss_score) /
+                              max(1, sum(1 for f in findings if f.cvss_score)), 1)
+                       if any(f.cvss_score for f in findings) else None,
+        })
+    return result
 
 
 def _user_from_token(token: str | None) -> str | None:

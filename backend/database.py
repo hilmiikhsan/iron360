@@ -52,6 +52,10 @@ def _migrate() -> None:
         "findings": {
             "fix_config": "TEXT DEFAULT ''",
             "fix_steps": "TEXT DEFAULT ''",
+            "cvss_score": "REAL",
+            "cvss_vector": "VARCHAR(255) DEFAULT ''",
+            "cwe": "VARCHAR(64) DEFAULT ''",
+            "references": "TEXT DEFAULT '[]'",
         },
         "scans": {
             "profile": "VARCHAR(16) DEFAULT 'full'",
@@ -66,6 +70,7 @@ def _migrate() -> None:
             for col, ddl in cols.items():
                 if col not in existing:
                     try:
-                        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}"))
+                        qcol = f'"{col}"' if col in ("references", "order", "group", "index") else col
+                        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {qcol} {ddl}"))
                     except Exception:  # noqa: BLE001
                         pass

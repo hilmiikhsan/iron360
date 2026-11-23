@@ -54,10 +54,17 @@ Rules:
 - Honest confidence (0-100).
 - remediation must be CONCRETE: `fix_config` is the actual copy-pasteable config/code for the DETECTED stack
   (real nginx/apache directive, real parameterized query, exact header/cipher line); `fix_steps` = apply + verify. Never vague.
+- For every finding, include a CVSS v3.1 vector string (AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H format)
+  and compute the numeric base score. Also assign the most specific CWE identifier (e.g. CWE-79, CWE-89).
+  Add a "references" list of relevant URLs (NVD link for CVEs, OWASP page, vendor advisory).
+- Cross-correlate findings from different tools: if nmap detects a service version AND nuclei finds a
+  CVE on the same service, merge them into one finding with higher confidence and both tools in sources.
+  If multiple tools confirm the same issue, it is 'confirmed' with higher confidence.
 - Reply with ONLY a JSON array (no prose, no markdown fences). Each item:
   {"title","severity":"critical|high|medium|low|info","status":"confirmed|likely|needs_review",
-   "confidence":int,"affected","cve","description","evidence","remediation","fix_config","fix_steps",
-   "sources":[tool names]}."""
+   "confidence":int,"affected","cve","cvss_score":float,"cvss_vector":"CVSS:3.1/AV:.../...",
+   "cwe":"CWE-XXX","description","evidence","remediation","fix_config","fix_steps",
+   "references":["url1","url2"],"sources":[tool names]}."""
 
 # gf-style parameter patterns (from tomnomnom/gf) — applied in Python to the merged URL list,
 # so the "parameter extraction + gf pattern tagging" methodology runs with no extra tools installed.
@@ -141,7 +148,9 @@ def _vuln_steps(host: str, profile: str) -> list[tuple[str, str, dict, str]]:
         return [
             ("nuclei", host, {"severity": "info,low,medium,high,critical"}, "Full template vuln scan (all severities)"),
             ("nikto", host, {}, "Web server vuln scan"),
+            ("wapiti", host, {}, "Web app vuln scan (XSS/SQLi/LFI/SSRF/XXE)"),
             ("sslscan", host, {}, "TLS/SSL protocol + cipher audit"),
+            ("testssl", host, {}, "Deep TLS/SSL audit (BEAST/POODLE/Heartbleed)"),
         ]
     if profile == "compliance":
         return [
@@ -153,7 +162,9 @@ def _vuln_steps(host: str, profile: str) -> list[tuple[str, str, dict, str]]:
         ("nuclei", host, {"severity": "info,low,medium,high,critical"}, "Full template vuln scan (all severities)"),
         ("nmap", host, {"sv": True, "scripts": "vuln"}, "Network vulnerability scripts (nmap NSE)"),
         ("nikto", host, {}, "Web server vuln scan"),
+        ("wapiti", host, {}, "Web app vuln scan (XSS/SQLi/LFI/SSRF/XXE)"),
         ("sslscan", host, {}, "TLS/SSL protocol + cipher audit"),
+        ("testssl", host, {}, "Deep TLS/SSL audit (BEAST/POODLE/Heartbleed)"),
     ]
 
 
@@ -164,14 +175,11 @@ def _phases(target: Target, mode: str, profile: str = "full") -> list[tuple[str,
     wanted = PROFILES.get(profile, PROFILES["full"])["phases"]
 
     recon = []
-    if is_domain:
-        if mode == "pentest":
-            # Subdomain enum only in pentest — VA focuses on the single target domain.
-            recon.append(("subfinder",    host, {}, "Subdomain enum — subfinder"))
-            recon.append(("assetfinder",  host, {}, "Subdomain enum — assetfinder"))
-            recon.append(("amass",        host, {}, "Subdomain enum — amass (passive)"))
-            recon.append(("findomain",    host, {}, "Subdomain enum — findomain"))
-        # URL archive tools gather known paths/params on the target domain itself.
+    if is_domain and mode == "pentest":
+        recon.append(("subfinder",    host, {}, "Subdomain enum — subfinder"))
+        recon.append(("assetfinder",  host, {}, "Subdomain enum — assetfinder"))
+        recon.append(("amass",        host, {}, "Subdomain enum — amass (passive)"))
+        recon.append(("findomain",    host, {}, "Subdomain enum — findomain"))
         recon.append(("gau",          host, {}, "Gather known URLs — Wayback/OTX (passive)"))
         recon.append(("waybackurls",  host, {}, "Gather URLs — Wayback Machine (passive)"))
     recon.append(("dnsx", host, {}, "Resolve DNS records"))
@@ -193,8 +201,10 @@ def _phases(target: Target, mode: str, profile: str = "full") -> list[tuple[str,
 
     phases: list[tuple[str, list]] = []
     for name in wanted:
-        if name == "content" and mode != "pentest":
-            continue  # content discovery is intrusive — pentest only
+        if name in ("content", "crawl") and mode != "pentest":
+            continue
+        if name == "recon" and mode != "pentest" and not recon:
+            continue
         if name in blocks and blocks[name][1]:
             phases.append(blocks[name])
     return phases
@@ -315,7 +325,7 @@ def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
         if cphunter_bridge.available():
             n += 1
             emit({"type": "step", "n": n, "tool": "cphunter", "status": "running",
-                  "text": "CVE mass-detection (CPHunter) — all modules"})
+                  "text": "CVE mass-detection — all modules"})
             cph = cphunter_bridge.detect(target, host, emit, stop_event)
             cph_findings = [_cph_to_finding(c, host) for c in cph]
             all_findings += cph_findings
@@ -323,7 +333,7 @@ def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
                               "\n".join(f"[{c['state'].upper()}] {c['cve']} {c.get('version','')} "
                                         f"{c.get('evidence','')[:160]}" for c in cph) or "(no CVE hits)"))
             emit({"type": "step", "n": n, "tool": "cphunter", "status": "done",
-                  "text": f"CPHunter — {sum(1 for c in cph if c['state']=='vulnerable')} vulnerable, "
+                  "text": f"CVE detection — {sum(1 for c in cph if c['state']=='vulnerable')} vulnerable, "
                           f"{sum(1 for c in cph if c['state']=='inconclusive')} inconclusive"})
 
     # Merge + dedupe + parameter extraction + gf-pattern tagging (3 Bugs methodology).
@@ -417,6 +427,9 @@ def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
     emit({"type": "reasoning", "text": "Analyzing all collected output with Claude + extracting validated findings…"})
     all_findings += _ai_extract_findings(target, collected, emit)
 
+    # Cross-tool correlation: merge duplicates, boost confidence for multi-tool corroboration.
+    all_findings = _correlate_findings(all_findings, emit)
+
     # (2) Align severity to CVE CVSS where a CVE is present
     all_findings = _apply_cve_severity(all_findings, emit)
 
@@ -441,7 +454,7 @@ def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
                 if _stopped(stop_event):
                     break
                 if not _approve(f"exploit-{f['cve']}",
-                                f"Proof-of-impact exploit {f['cve']} on {host} (CPHunter safe PoC, read-only)"):
+                                f"Proof-of-impact exploit {f['cve']} on {host} (safe PoC, read-only)"):
                     continue
                 res = cphunter_bridge.exploit(target, f["cve"], host, emit, stop_event)
                 if res.get("ran"):
@@ -451,7 +464,7 @@ def _run_live(target: Target, mode: str, autonomy: str, emit: Emit,
                         f["confidence"] = max(int(f.get("confidence", 0) or 0), 95)
                     exploited.append(f)
             if exploited:
-                emit({"type": "reasoning", "text": "AI validating CPHunter exploit output as real proof-of-impact…"})
+                emit({"type": "reasoning", "text": "AI validating exploit output as real proof-of-impact…"})
                 validated = _verify_findings(target, exploited, emit)
                 by_title = {v["title"]: v for v in validated}
                 for f in exploited:
@@ -511,28 +524,31 @@ def _cph_to_finding(c: dict, host: str) -> dict:
     cve = c.get("cve", "")
     if c.get("state") == "vulnerable":
         ex = c.get("exploit_state")
-        ex_note = (" CPHunter safe-exploit confirmed impact." if ex is True
+        ex_note = (" Safe-exploit confirmed impact." if ex is True
                    else " Safe-exploit inconclusive." if ex is None else "")
         return {
-            "title": f"{cve} — vulnerable component (CPHunter)", "severity": "high", "status": "likely",
+            "title": f"{cve} — vulnerable component", "severity": "high", "status": "likely",
             "confidence": 72, "affected": f"{host}{(':' + str(c['port'])) if c.get('port') else ''}",
             "cve": cve,
-            "description": f"CPHunter flagged {host} VULNERABLE to {cve}."
+            "description": f"CVE detection flagged {host} VULNERABLE to {cve}."
                            + (f" Detected version: {c['version']}." if c.get("version") else "")
                            + ex_note,
             "evidence": (c.get("evidence", "") + ("\n" + c.get("exploit_evidence", "") if c.get("exploit_evidence") else "")).strip(),
             "remediation": "Upgrade/patch the affected component to a fixed release; apply vendor advisory for this CVE.",
             "fix_config": "", "fix_steps": "1. Confirm installed version. 2. Upgrade to the patched release. "
                                            "3. Re-run detection to verify the CVE no longer matches.",
-            "sources": ["cphunter"], "_cph_state": "vulnerable",
+            "cvss_score": None, "cvss_vector": "", "cwe": "", "references": [f"https://nvd.nist.gov/vuln/detail/{cve}"],
+            "sources": ["cve-detection"], "_cph_state": "vulnerable",
         }
     return {
-        "title": f"{cve} — possible (unconfirmed version) (CPHunter)", "severity": "info", "status": "needs_review",
+        "title": f"{cve} — possible (unconfirmed version)", "severity": "info", "status": "needs_review",
         "confidence": 30, "affected": host, "cve": cve,
-        "description": f"CPHunter returned INCONCLUSIVE for {cve} on {host} — the component version could not be "
+        "description": f"CVE detection returned INCONCLUSIVE for {cve} on {host} — the component version could not be "
                        "confirmed, so this is NOT asserted as vulnerable (anti-false-positive).",
         "evidence": c.get("evidence", ""), "remediation": "Manually confirm the component version to decide.",
-        "fix_config": "", "fix_steps": "", "sources": ["cphunter"], "_cph_state": "inconclusive",
+        "fix_config": "", "fix_steps": "",
+        "cvss_score": None, "cvss_vector": "", "cwe": "", "references": [f"https://nvd.nist.gov/vuln/detail/{cve}"],
+        "sources": ["cve-detection"], "_cph_state": "inconclusive",
     }
 
 
@@ -599,9 +615,13 @@ def _ai_extract_findings(target: Target, collected: list[tuple[str, str, str]], 
                 "title": str(f.get("title"))[:255], "severity": f.get("severity", "info"),
                 "status": f.get("status", "needs_review"), "confidence": int(f.get("confidence", 0) or 0),
                 "affected": str(f.get("affected", ""))[:255], "cve": str(f.get("cve", ""))[:64],
+                "cvss_score": float(f["cvss_score"]) if f.get("cvss_score") else None,
+                "cvss_vector": str(f.get("cvss_vector", ""))[:255],
+                "cwe": str(f.get("cwe", ""))[:64],
                 "description": str(f.get("description", "")), "evidence": str(f.get("evidence", "")),
                 "remediation": str(f.get("remediation", "")), "fix_config": str(f.get("fix_config", "")),
                 "fix_steps": str(f.get("fix_steps", "")),
+                "references": f.get("references", []) if isinstance(f.get("references"), list) else [],
                 "sources": f.get("sources", []) if isinstance(f.get("sources"), list) else [],
             })
         return out
@@ -618,6 +638,46 @@ its evidence genuinely supports it.
 - If the evidence does not support the claim at all, set status 'false_positive'.
 - Append a one-sentence verification note to 'description' prefixed with 'VERIFY: '.
 Reply with ONLY a JSON array of the SAME findings (same fields) with adjusted status/confidence/description."""
+
+
+def _correlate_findings(findings: list[dict], emit: Emit) -> list[dict]:
+    """Merge duplicate findings from different tools and boost confidence for multi-tool corroboration."""
+    if len(findings) < 2:
+        return findings
+    merged: list[dict] = []
+    used = set()
+    for i, f in enumerate(findings):
+        if i in used:
+            continue
+        key_cve = (f.get("cve") or "").upper()
+        key_affected = (f.get("affected") or "").lower()
+        for j in range(i + 1, len(findings)):
+            if j in used:
+                continue
+            g = findings[j]
+            same_cve = key_cve and key_cve == (g.get("cve") or "").upper()
+            same_affected = key_affected and key_affected == (g.get("affected") or "").lower()
+            same_title = f.get("title", "").lower().split()[:3] == g.get("title", "").lower().split()[:3]
+            if same_cve or (same_affected and same_title):
+                used.add(j)
+                g_sources = g.get("sources") or []
+                f_sources = f.get("sources") or []
+                f["sources"] = list(dict.fromkeys(f_sources + g_sources))
+                f["confidence"] = min(100, max(int(f.get("confidence", 0)), int(g.get("confidence", 0))) + 15)
+                if _SEV_RANK.get(g.get("severity", "info"), 0) > _SEV_RANK.get(f.get("severity", "info"), 0):
+                    f["severity"] = g["severity"]
+                if len(f["sources"]) >= 2 and f.get("status") != "confirmed":
+                    f["status"] = "confirmed"
+                if g.get("cvss_score") and (not f.get("cvss_score") or g["cvss_score"] > f["cvss_score"]):
+                    f["cvss_score"] = g["cvss_score"]
+                    f["cvss_vector"] = g.get("cvss_vector") or f.get("cvss_vector", "")
+                if g.get("evidence") and g["evidence"] not in (f.get("evidence") or ""):
+                    f["evidence"] = (f.get("evidence", "") + "\n\n" + g["evidence"])[:4000]
+        merged.append(f)
+    deduped = len(findings) - len(merged)
+    if deduped:
+        emit({"type": "reasoning", "text": f"Cross-tool correlation merged {deduped} duplicate finding(s), {len(merged)} unique remain."})
+    return merged
 
 
 _SEV_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
@@ -644,13 +704,23 @@ def _apply_cve_severity(findings: list[dict], emit: Emit) -> list[dict]:
         c = cve.nvd_lookup(cves[0])
         f["cve"] = cves[0]
         if c.get("cvss"):
-            band = _cvss_band(float(c["cvss"]))
+            score = float(c["cvss"])
+            band = _cvss_band(score)
+            if not f.get("cvss_score") or score > (f.get("cvss_score") or 0):
+                f["cvss_score"] = score
+            if c.get("vector") and not f.get("cvss_vector"):
+                f["cvss_vector"] = c["vector"]
             if _SEV_RANK.get(band, 0) > _SEV_RANK.get(f.get("severity", "info"), 0):
                 f["severity"] = band
                 bumped += 1
-            note = f" (CVE {cves[0]} · CVSS {c['cvss']} {c.get('severity') or ''})"
+            note = f" (CVE {cves[0]} · CVSS {score} {c.get('severity') or ''})"
             if note.strip() not in f.get("description", ""):
                 f["description"] = (f.get("description", "") + note).strip()
+            nvd_url = f"https://nvd.nist.gov/vuln/detail/{cves[0]}"
+            refs = f.get("references") or []
+            if nvd_url not in refs:
+                refs.append(nvd_url)
+                f["references"] = refs
     if bumped:
         emit({"type": "reasoning", "text": f"CVE/CVSS alignment raised severity on {bumped} finding(s)."})
     return findings

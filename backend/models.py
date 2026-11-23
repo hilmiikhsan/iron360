@@ -10,7 +10,7 @@ Core domain:
 from __future__ import annotations
 
 import datetime as dt
-from sqlalchemy import String, Integer, Text, DateTime, ForeignKey, Boolean, JSON
+from sqlalchemy import String, Integer, Float, Text, DateTime, ForeignKey, Boolean, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -97,12 +97,31 @@ class Finding(Base):
     # (NOT generic advice — this is the boss's "kasih tau config-nya apa" requirement).
     fix_config: Mapped[str] = mapped_column(Text, default="")      # actual config/code block
     fix_steps: Mapped[str] = mapped_column(Text, default="")       # apply + verify steps
+    cvss_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cvss_vector: Mapped[str] = mapped_column(String(255), default="")
+    cwe: Mapped[str] = mapped_column(String(64), default="")
+    references: Mapped[list] = mapped_column(JSON, default=list)
     # Which tools corroborated this (multi-tool corroboration), JSON list.
     sources: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     target: Mapped["Target"] = relationship(back_populates="findings")
     scan: Mapped["Scan"] = relationship(back_populates="findings")
+
+
+class ScheduledScan(Base):
+    __tablename__ = "scheduled_scans"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    target_id: Mapped[int] = mapped_column(ForeignKey("targets.id"))
+    profile: Mapped[str] = mapped_column(String(16), default="full")
+    cron_expr: Mapped[str] = mapped_column(String(64))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_run: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_run: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    target: Mapped["Target"] = relationship()
 
 
 class AuditLog(Base):

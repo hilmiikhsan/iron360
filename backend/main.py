@@ -18,7 +18,7 @@ from .config import get_settings
 from .database import SessionLocal, init_db
 from .engine import runner
 from .models import User
-from .routers import audit, auth, findings, meta, modules, reports, scans, targets
+from .routers import audit, auth, findings, meta, modules, reports, scans, schedules, targets
 from .security import hash_password
 
 logging.basicConfig(level=logging.INFO)
@@ -51,7 +51,10 @@ def seed_admin() -> None:
 async def lifespan(app: FastAPI):
     init_db()
     seed_admin()
-    runner.bind_loop(asyncio.get_running_loop())
+    loop = asyncio.get_running_loop()
+    runner.bind_loop(loop)
+    from .engine import scheduler
+    scheduler.start(loop)
     log.info("Iron360 up — AI engine: %s", "LIVE" if settings.ai_live else "SIMULATION")
     yield
 
@@ -89,7 +92,7 @@ async def security_headers(request: Request, call_next):
 
 
 for r in (auth.router, targets.router, scans.router, findings.router, audit.router,
-          meta.router, reports.router, modules.router):
+          meta.router, reports.router, modules.router, schedules.router):
     app.include_router(r)
 
 

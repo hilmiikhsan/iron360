@@ -80,7 +80,7 @@ class ApprovalDecision(BaseModel):
     approved: bool
 
 
-class ScanOut(ORMModel):
+class ScanBrief(ORMModel):
     id: int
     target_id: int
     mode: str
@@ -90,6 +90,9 @@ class ScanOut(ORMModel):
     started_at: dt.datetime
     finished_at: dt.datetime | None
     summary: str
+
+
+class ScanOut(ScanBrief):
     timeline: list
 
 
@@ -103,12 +106,16 @@ class FindingOut(ORMModel):
     status: str
     confidence: int
     cve: str
+    cvss_score: float | None = None
+    cvss_vector: str = ""
+    cwe: str = ""
     affected: str
     description: str
     evidence: str
     remediation: str
     fix_config: str
     fix_steps: str
+    references: list = []
     sources: list
     created_at: dt.datetime
 
@@ -119,6 +126,29 @@ class FindingStatusUpdate(BaseModel):
 
 class ChatMessage(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
+
+
+class ScheduledScanCreate(BaseModel):
+    target_id: int
+    profile: str = "full"
+    cron_expr: str = Field(min_length=5, max_length=64)
+
+
+class ScheduledScanUpdate(BaseModel):
+    profile: str | None = None
+    cron_expr: str | None = None
+    enabled: bool | None = None
+
+
+class ScheduledScanOut(ORMModel):
+    id: int
+    target_id: int
+    profile: str
+    cron_expr: str
+    enabled: bool
+    last_run: dt.datetime | None
+    next_run: dt.datetime | None
+    created_at: dt.datetime
 
 
 class AuditOut(ORMModel):
