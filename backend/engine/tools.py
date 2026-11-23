@@ -334,27 +334,62 @@ def _cphunter_bin() -> str | None:
     return None
 
 
-_CPH_MODULES = {
-    "java4shell":  ("CVE-2026-114938", "CVE-2026-114938 — OpenJDK AVX-512 Base64 heap overflow (critical). Targets Keycloak/Jenkins/Confluence/Spring/Tomcat/Elasticsearch."),
-    "nginx2root":  ("CVE-2026-123007", "CVE-2026-123007 — nginx HTTP/2 flow-control integer underflow → RCE (critical). Targets nginx 1.9.5–1.30.6 / 1.31.0–1.31.8 with h2."),
-    "sshole":      ("CVE-2026-123158", "CVE-2026-123158 — OpenSSH musl crypt() auth bypass (high). Targets Alpine/musl-based OpenSSH < 10.6p2."),
-}
+def _discover_cphunter_modules() -> list[dict]:
+    """Auto-discover CVE modules from CPHunter's MODULE_CATALOG at startup."""
+    import ast
+    cph = _cphunter_bin()
+    if not cph:
+        return []
+    try:
+        from pathlib import Path
+        src = Path(cph).read_text(errors="ignore")
+        tree = ast.parse(src)
+        for node in ast.iter_child_nodes(tree):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id == "MODULE_CATALOG":
+                        return ast.literal_eval(node.value)
+    except Exception:
+        pass
+    return []
 
-for _mod_id, (_cve_id, _mod_desc) in _CPH_MODULES.items():
-    _register(Tool(
-        name=f"cphunter_{_mod_id}",
-        binary=_settings.cphunter_python if _settings.cphunter_python else "python3",
-        category="exploit",
-        intensity="active",
-        description=f"CPHunter {_mod_desc} Option: port (target port).",
-        build=(lambda cve: lambda host, o: [
-            _settings.cphunter_python or "python3",
-            _cphunter_bin() or "cphunter.py",
-            host, "--scan", "--cve-vuln",
-            "--cve-filter", cve,
-            "--cve-vuln-timeout", str(_settings.cphunter_timeout),
-        ])(str(_cve_id)),
-    ))
+
+def register_cphunter_tools() -> int:
+    """Parse CPHunter MODULE_CATALOG and register each as an Iron360 tool. Returns count."""
+    catalog = _discover_cphunter_modules()
+    skip_categories = {"inventory", "simulation", "diagnostic"}
+    count = 0
+    for mod in catalog:
+        mod_id = mod.get("id", "")
+        name = mod.get("name", mod_id)
+        category = mod.get("category", "")
+        risk = mod.get("risk", "")
+        ports = mod.get("ports", "")
+        if category in skip_categories or ports == "local":
+            continue
+        tool_name = f"cphunter_{mod_id}"
+        if tool_name in REGISTRY:
+            continue
+        desc = f"CPHunter {name} [{category}/{risk}] (ports: {ports})"
+        _register(Tool(
+            name=tool_name,
+            binary=_settings.cphunter_python if _settings.cphunter_python else "python3",
+            category="exploit",
+            intensity="active" if risk in ("critical", "high") else "passive",
+            description=desc,
+            build=(lambda mid: lambda host, o: [
+                _settings.cphunter_python or "python3",
+                _cphunter_bin() or "cphunter.py",
+                host, "--scan", "--cve-vuln",
+                "--cve-filter", mid,
+                "--cve-vuln-timeout", str(_settings.cphunter_timeout),
+            ])(str(mod_id)),
+        ))
+        count += 1
+    return count
+
+
+_cph_count = register_cphunter_tools()
 
 
 def installed_tools() -> dict[str, bool]:

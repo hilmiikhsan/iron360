@@ -55,7 +55,10 @@ async def lifespan(app: FastAPI):
     runner.bind_loop(loop)
     from .engine import scheduler
     scheduler.start(loop)
-    log.info("Iron360 up — AI engine: %s", "LIVE" if settings.ai_live else "SIMULATION")
+    from .engine.tools import REGISTRY
+    cph_tools = sum(1 for k in REGISTRY if k.startswith("cphunter_"))
+    log.info("Iron360 up — AI engine: %s, tools: %d (%d CPHunter CVE modules)",
+             "LIVE" if settings.ai_live else "SIMULATION", len(REGISTRY), cph_tools)
     yield
 
 
